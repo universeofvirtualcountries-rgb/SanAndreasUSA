@@ -1,15 +1,16 @@
-# Enabling the CI build (one-time, 30 seconds)
+# Updating the Android CI workflow
 
-The build workflow lives in [`build_android.yml`](build_android.yml) instead of
-`.github/workflows/` because the GitHub App that pushed this branch is not allowed to
-create files under `.github/workflows/` (`refusing to allow a GitHub App to create or
-update workflow ... without workflows permission`). A human with the repo can enable it
-in one step:
+The active workflow is `.github/workflows/build_android.yml`. The updated
+[`build_android.yml`](build_android.yml) template also invokes the standalone
+ARM source check. The GitHub App cannot update workflow files without
+`workflows` permission. A maintainer can sync the active copy using either
+option below. Until then, the active workflow runs the new host cases, the
+CMake source-list guard and both NDK builds.
 
 **Option A — GitHub web UI**
 
 1. Open <https://github.com/universeofvirtualcountries-rgb/SanAndreasUSA>.
-2. *Add file → Create new file*.
+2. Open the active workflow and select *Edit this file* (create it if missing).
 3. Path: `.github/workflows/build_android.yml`.
 4. Paste the contents of `ci/build_android.yml` (skip the three `###` header lines),
    commit to `main`.
