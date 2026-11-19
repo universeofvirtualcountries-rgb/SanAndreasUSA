@@ -32,6 +32,7 @@ if(ANDROID)
         src/main.cpp
         src/adapter/gtasa_adapter.cpp
         src/net/android_http.cpp
+        src/ui/imgui_overlay.cpp
         mod/logger.cpp
         mod/config.cpp
         mod/thirdparty/imgui/imgui.cpp
