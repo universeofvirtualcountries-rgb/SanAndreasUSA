@@ -242,6 +242,7 @@ void ModApp::BootRuntime() {
     });
 
     m_sessionStart = m_adapter.NowSeconds();
+    m_ready = true;
     m_runtimeReady = true;
     logger->Info("USA 1:1 loaded: %zu models, %zu missions, grid %dx%d", m_catalog.Size(), m_missions.Size(),
                  m_config.gridRadius * 2 + 1, m_config.gridRadius * 2 + 1);
