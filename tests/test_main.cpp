@@ -22,6 +22,7 @@
 #include "core/touch_gesture.hpp"
 #include "core/world_delta.hpp"
 #include "net/cloud_sync.hpp"
+#include "ui/imgui_touch.hpp"
 #include "plugin-sdk/renderware/imgui/imgui_shared.h"
 
 #include <cmath>
@@ -1044,6 +1045,49 @@ TEST(imgui_touch_dimensions_follow_frames_and_reset_to_raw) {
     CHECK(coordinator.LastTouch().x == 600.0f && coordinator.LastTouch().renderW == 0);
 }
 
+TEST(open_menu_routes_raw_touch_to_real_imgui_button) {
+    ImGuiContext *context = ImGui::CreateContext();
+    auto &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(1200, 540);
+    io.DeltaTime = 1.0f / 60.0f;
+    unsigned char *pixels = nullptr;
+    int texW = 0, texH = 0;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &texW, &texH);
+    core::MenuTouchQueue queue;
+    auto frame = [&]() {
+        const bool trickle = io.ConfigInputTrickleEventQueue;
+        if (const auto touch = queue.Pop())
+            ui::FeedImGuiTouch(io, *touch, ScreenToRender(touch->x, touch->y, 2400, 1080, 1200, 540));
+        ImGui::NewFrame();
+        io.ConfigInputTrickleEventQueue = trickle;
+        ImGui::SetNextWindowPos(ImVec2(100, 100));
+        ImGui::SetNextWindowSize(ImVec2(500, 350));
+        ImGui::Begin("Teleports");
+        ImGui::SetCursorScreenPos(ImVec2(160, 160));
+        const bool clicked = ImGui::Button("New York", ImVec2(160, 60));
+        ImGui::End();
+        ImGui::Render();
+        return clicked;
+    };
+    frame();
+    frame();
+    CHECK(!queue.Capture(false, 2, 0, 400, 360));
+    CHECK(queue.Capture(true, 2, 0, 400, 360));
+    CHECK(queue.Capture(true, 2, 1, 20, 20)); // extra finger never becomes the ImGui mouse
+    CHECK(queue.Capture(true, 3, 0, 420, 370));
+    CHECK(queue.Capture(false, 1, 1, 20, 20));
+    CHECK(queue.Capture(false, 1, 0, 420, 370)); // still captured if UI closed mid-gesture
+    CHECK(!frame() && io.MouseDown[0]);
+    CHECK(!frame() && io.MouseDown[0]);
+    CHECK(frame() && !io.MouseDown[0]);
+    CHECK(queue.Capture(true, 2, 0, 400, 360));
+    CHECK(queue.Capture(true, 4, 0, 400, 360));
+    CHECK(!frame() && io.MouseDown[0]);
+    CHECK(!frame() && !io.MouseDown[0]);
+    ImGui::DestroyContext(context);
+}
+
 TEST(road_selection_uses_table_whitelist_tags_then_largest_flat_collision) {
     auto candidate = [](int id, PropTag tag, Vec3f half, bool collidable = true) {
         ModelProto p;
@@ -1055,17 +1099,17 @@ TEST(road_selection_uses_table_whitelist_tags_then_largest_flat_collision) {
         return p;
     };
     ModelCatalog cat;
-    cat.AddModels({candidate(10, PropTag::RoadFlat, {8, 12, 0.25f}),
-                   candidate(20, PropTag::Prop, {6, 10, 0.2f}),
-                   candidate(30, PropTag::Prop, {10, 10, 0.5f}),
-                   candidate(40, PropTag::Prop, {40, 40, 12}),
-                   candidate(50, PropTag::RoadFlat, {20, 20, 0.0f}, false)});
+    cat.AddModels({candidate(3010, PropTag::RoadFlat, {8, 12, 0.25f}),
+                   candidate(3020, PropTag::Prop, {6, 10, 0.2f}),
+                   candidate(3030, PropTag::Prop, {10, 10, 0.5f}),
+                   candidate(3040, PropTag::Prop, {40, 40, 12}),
+                   candidate(3050, PropTag::RoadFlat, {20, 20, 0.0f}, false)});
     auto pick = [](const ModelProto *p) { return p ? p->id : -1; };
-    CHECK(pick(cat.PickRoad(20, 30)) == 20);
-    CHECK(pick(cat.PickRoad(40, 30)) == 30);
-    CHECK(pick(cat.PickRoad(40, 50)) == 10);
-    cat.Add(candidate(10, PropTag::Prop, {8, 12, 0.25f}));
-    CHECK(pick(cat.PickRoad()) == 30);
+    CHECK(pick(cat.PickRoad(3020, 3030)) == 3020);
+    CHECK(pick(cat.PickRoad(3040, 3030)) == 3030);
+    CHECK(pick(cat.PickRoad(3040, 3050)) == 3010);
+    cat.Add(candidate(3010, PropTag::Prop, {8, 12, 0.25f}));
+    CHECK(pick(cat.PickRoad()) == 3030);
     cat.Clear();
     CHECK(!cat.PickRoad());
 }
@@ -1083,6 +1127,13 @@ TEST(road_rejects_postbox_dynamic_and_unverified_flat_props) {
     postbox.tag = PropTag::RoadFlat;
     postbox.isRoad = true;
     CHECK(!IsFlatRoadCandidate(postbox)); // even with a bogus road tag and large bounds
+    postbox.name = "road_valid_but_id_too_low";
+    CHECK(!IsFlatRoadCandidate(postbox));
+    auto high = slab;
+    high.id = 18001;
+    CHECK(!IsFlatRoadCandidate(high));
+    high.id = 18000;
+    CHECK(IsFlatRoadCandidate(high));
     postbox.name = "DYN_roadbarrier";
     CHECK(!IsFlatRoadCandidate(postbox));
 
@@ -1141,6 +1192,43 @@ TEST(polygon_defers_unready_road_and_flushes_only_once) {
     bridge.ready = true;
     polygon.Update({}, {});
     CHECK(polygon.HasVisuals() && bridge.created > 0 && bridge.flushes == 1);
+}
+
+TEST(polygon_holds_player_when_other_tiles_exist_but_support_is_missing) {
+    class PartialBridge : public test::MockBridge {
+      public:
+        bool supportReady = false;
+        bool hit = false;
+        bool HasRoadSupportAt(ObjectHandle, const Vec3f &surface) override {
+            CHECK(surface.y == 20.0f && surface.z == 300.0f);
+            return hit;
+        }
+        ObjectHandle CreateObject(const SpawnParams &params) override {
+            if (!supportReady && std::abs(params.pos.y - 20.0f) < 0.01f)
+                return {};
+            return MockBridge::CreateObject(params);
+        }
+    } bridge;
+    bridge.player = {10.0f, 20.0f, 40.0f};
+    TestPolygon polygon(bridge, MakeTestCatalog());
+    CHECK(polygon.Enable({1010, 2020}, {1000, 2000}));
+    CHECK(polygon.TileCount() > 0 && polygon.WaitingForSupport());
+    CHECK(bridge.player.x == 10.0f && bridge.player.y == 20.0f && bridge.player.z == 301.5f);
+    CHECK(bridge.playerVelocity.x == 0 && bridge.playerVelocity.y == 0 && bridge.playerVelocity.z == 0);
+    bridge.player = {40.0f, 22.0f, 290.0f};
+    bridge.playerVelocity = {3, 4, -10};
+    polygon.Update({1040, 2022}, {1000, 2000});
+    CHECK(bridge.player.x == 10.0f && bridge.player.y == 20.0f && bridge.player.z == 301.5f);
+    polygon.OnOriginShift({1200, 2000});
+    CHECK(bridge.player.x == -190.0f && bridge.player.z == 301.5f);
+    const auto tilesBefore = polygon.TileCount();
+    bridge.supportReady = true;
+    bridge.now = 2.1;
+    polygon.Update({1010, 2020}, {1200, 2000});
+    CHECK(polygon.WaitingForSupport() && polygon.TileCount() == tilesBefore + 1);
+    bridge.hit = true;
+    polygon.Update({1010, 2020}, {1200, 2000});
+    CHECK(!polygon.WaitingForSupport());
 }
 
 TEST(interior_defers_unready_props_and_flushes_only_once) {
@@ -1217,7 +1305,7 @@ TEST(polygon_reports_markers_only_if_road_request_fails) {
     CHECK(polygon.Enable({}, {}));
     CHECK(polygon.RoadModel() == 3001);
     CHECK(!polygon.HasVisuals() && polygon.MarkerCount() > 0);
-    CHECK(bridge.player.z == 302.0f);
+    CHECK(bridge.player.z == 301.5f && polygon.WaitingForSupport());
     polygon.Disable();
     CHECK(bridge.releases == 0 && bridge.flushes == 0);
 }
@@ -1418,10 +1506,7 @@ TEST(catalogue_parses_sample_and_filters) {
     std::string err;
     CHECK_MSG(cat.LoadFromFile(SrcPath("assets/objects_db.sample.json"), &err), err);
     CHECK(cat.Size() == 6);
-    const ModelProto *road = cat.PickRoad();
-    CHECK(road != nullptr);
-    if (road)
-        CHECK(road->id == 1236);
+    CHECK(cat.PickRoad() == nullptr); // illustrative ID 1236 is not an eligible road
     CHECK(cat.HasTag(PropTag::Building));
     CHECK(cat.HasTag(PropTag::Furniture));
     CHECK(!cat.HasTag(PropTag::Door));

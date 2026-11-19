@@ -1,10 +1,12 @@
 #include "imgui_overlay.hpp"
+#include "imgui_touch.hpp"
 
 #include "core/log.hpp"
 
 #include <mod/thirdparty/imgui/imgui.h>
 #include <plugin-sdk/renderware/imgui/imgui_impl_renderware.h>
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -32,12 +34,13 @@ bool ImGuiOverlay::Initialize() {
     if (m_initialised)
         return true;
     g_overlay = this;
-    if (!ImGui_ImplRenderWare_Init(&ImGuiOverlay::RenderCallback)) {
+    if (!ImGui_ImplRenderWare_Init(&ImGuiOverlay::RenderCallback, &ImGuiOverlay::InputCallback)) {
         USA_LOG_E("Overlay: ImGui RenderWare backend failed to initialise");
         g_overlay = nullptr;
         return false;
     }
     m_initialised = true;
+    m_inputReady.store(true);
     USA_LOG_I("Overlay: ImGui ready (two-finger swipe down to open)");
     return true;
 }
@@ -45,6 +48,9 @@ bool ImGuiOverlay::Initialize() {
 void ImGuiOverlay::Shutdown() {
     if (!m_initialised)
         return;
+    m_inputReady.store(false);
+    SetVisible(false);
+    m_touches.Reset();
     ImGui_ImplRenderWare_Shutdown();
     m_initialised = false;
     if (g_overlay == this)
@@ -52,7 +58,7 @@ void ImGuiOverlay::Shutdown() {
 }
 
 void ImGuiOverlay::Toggle() {
-    m_visible = !m_visible;
+    SetVisible(!Visible());
     ++m_toggleCount;
 }
 
@@ -61,9 +67,61 @@ void ImGuiOverlay::SetMissions(const core::MissionManager *missions, const core:
     m_delta = delta;
 }
 
+void ImGuiOverlay::SetVisible(bool visible) {
+    m_visible.store(visible);
+    ImGui_ImplRenderWare_SetDirectTouchCapture(visible);
+}
+
+bool ImGuiOverlay::HandleTouch(int action, int track, int x, int y) {
+    if (!m_inputReady.load())
+        return false;
+    if (m_touches.Capture(Visible(), action, track, x, y))
+        return true;
+    return ImGui_ImplRenderWare_RouteTouch(action, track, x, y);
+}
+
+void ImGuiOverlay::InputCallback(int screenW, int screenH, int renderW, int renderH) {
+    if (!g_overlay)
+        return;
+    // Process DOWN and UP in separate frames, even for a tap between renders.
+    // This is the modern ImGui equivalent of setting io.MouseDown[0].
+    const auto event = g_overlay->m_touches.Pop();
+    if (!event)
+        return;
+    const auto pos = core::ScreenToRender(event->x, event->y, screenW, screenH, renderW, renderH);
+    FeedImGuiTouch(ImGui::GetIO(), *event, pos);
+    if (event->action == core::TouchAction::Down) {
+        g_overlay->m_tap = event;
+        g_overlay->m_tapMapped = pos;
+    }
+}
+
+void ImGuiOverlay::DrawTapStatus() {
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (m_tap) {
+        char line[192];
+        std::snprintf(line, sizeof(line), "Tap raw=(%d,%d) -> imgui=(%.1f,%.1f) hovered=%s",
+                      m_tap->x, m_tap->y, m_tapMapped.x, m_tapMapped.y,
+                      ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                          ? "yes" : "no");
+        m_tapStatus.Push(line, now);
+        USA_LOG_I("%s", line);
+        m_tap.reset();
+    }
+    std::string line;
+    if (m_tapStatus.Fresh(line, now)) {
+        const float x = (ImGui::GetIO().DisplaySize.x - ImGui::CalcTextSize(line.c_str()).x) * 0.5f;
+        auto *draw = ImGui::GetForegroundDrawList();
+        draw->AddText(ImVec2(x + 1.0f, 75.0f), IM_COL32(0, 0, 0, 220), line.c_str());
+        draw->AddText(ImVec2(x, 74.0f), IM_COL32(255, 236, 160, 255), line.c_str());
+    }
+}
+
 void ImGuiOverlay::RenderCallback() {
-    if (g_overlay)
+    if (g_overlay) {
         g_overlay->Draw();
+        g_overlay->DrawTapStatus();
+    }
 }
 
 // Small, always visible pill at the top center of the render surface.
@@ -250,7 +308,7 @@ void ImGuiOverlay::Draw() {
 
     ImGui::Separator();
     if (ImGui::Button("Close (two-finger swipe again)") || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-        m_visible = false;
+        SetVisible(false);
 
     ImGui::End();
 }

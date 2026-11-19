@@ -28,6 +28,7 @@ struct SpawnParams {
     bool interior = false;  // lives in interior space (z >= 1000), never shifted with the map
     bool collision = true;
     uint64_t ownerTag = 0;  // chunk seed / interior id, for debugging and bulk cleanup
+    bool roadSlab = false;  // test polygon: requires a verified road collider
 };
 
 // Everything the overlay shows and the debug log prints.
@@ -65,6 +66,8 @@ class IEngineBridge {
     virtual void SetPlayerPosition(const Vec3f &pos) = 0;
     // Safety warp: implementations may clear downward speed and move a driven vehicle too.
     virtual void RecoverPlayerPosition(const Vec3f &pos) { SetPlayerPosition(pos); }
+    // Pin a waiting player and stop linear motion until their floor is ready.
+    virtual void HoldPlayerPosition(const Vec3f &pos) { SetPlayerPosition(pos); }
     virtual bool IsPlayerInVehicle() = 0;
     virtual float GetFps() = 0;
 
@@ -89,6 +92,8 @@ class IEngineBridge {
 
     // --- mod owned objects ---------------------------------------------------
     virtual ObjectHandle CreateObject(const SpawnParams &params) = 0;
+    virtual bool IsObjectCollisionReady(ObjectHandle handle) { return static_cast<bool>(handle); }
+    virtual bool HasRoadSupportAt(ObjectHandle handle, const Vec3f &) { return IsObjectCollisionReady(handle); }
     virtual void DestroyObject(ObjectHandle handle) = 0;
     virtual void MoveObject(ObjectHandle handle, const Vec3f &pos) = 0;
     virtual size_t OwnedObjectCount() const = 0;

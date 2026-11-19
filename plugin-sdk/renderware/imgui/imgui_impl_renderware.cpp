@@ -20,6 +20,7 @@
 #include <GLES2/gl2.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -37,6 +38,9 @@ using DefinedState2dFn = void (*)();
 bool g_bInitialized = false;
 ImGuiContext *g_pImGuiContext = nullptr;
 ImGui_RenderCallback g_UserRenderCallback = nullptr;
+ImGui_TouchCallback g_UserTouchCallback = nullptr;
+std::atomic<bool> g_routeLocal{false};
+std::atomic<bool> g_directTouchCapture{false};
 const ImGuiShared::API *g_pSharedAPI = nullptr;
 ImGuiShared::Handle g_hClient = 0;
 ImGuiShared::TouchSample g_legacyTouch{}; // render thread only
@@ -49,6 +53,7 @@ bool ProviderScalesTouches() {
 ImGuiShared::Coordinator g_Coordinator;
 using usa1to1::core::PixelSize;
 using usa1to1::core::ResolveTouchScreenSize;
+PixelSize g_frameTouchSize; // local provider, render thread only
 PixelSize g_screenOverride; // config, set before hooks are installed
 
 // Render thread only. GL_VIEWPORT can describe an offscreen/scaled target,
@@ -88,7 +93,6 @@ float *g_pfNearZ = nullptr;
 float *g_pfRecipNearClip = nullptr;
 
 // Hooks (provider only)
-void (*orig_AND_TouchEvent)(int, int, int, int) = nullptr;
 void (*orig_MobileMenuRender)(void *) = nullptr;
 void (*orig_ShutdownRenderWare)() = nullptr;
 
@@ -249,7 +253,14 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
         lastLog = now;
     }
 
+    const bool trickle = io.ConfigInputTrickleEventQueue;
+    if (g_UserTouchCallback) {
+        const auto directScreen = g_routeLocal.load() ? g_frameTouchSize :
+                                  providerScalesTouch ? DetectTouchScreenSize({width, height}) : screen;
+        g_UserTouchCallback(directScreen.width, directScreen.height, width, height);
+    }
     ImGui::NewFrame();
+    io.ConfigInputTrickleEventQueue = trickle;
 
     if (g_UserRenderCallback)
         g_UserRenderCallback();
@@ -260,7 +271,12 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
     // Collected after EndFrame: until then ImGui's invisible fallback "Debug" window (400x400 at 60,60) is still
     // active and would swallow taps on the radar and the top-left of the pause map.
     std::vector<ImGuiShared::Rect> rects;
+    // The direct path owns touch while open; don't advertise its hitboxes to
+    // a shared (possibly older) provider and deliver the same event twice.
+    const bool directCapture = g_directTouchCapture.load();
     for (const ImGuiWindow *win : g_pImGuiContext->Windows) {
+        if (directCapture)
+            break;
         if (!win->Active || win->Hidden || (win->Flags & (ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_ChildWindow)))
             continue;
         ImGuiShared::Rect r{win->Pos.x, win->Pos.y, win->Pos.x + win->Size.x, win->Pos.y + win->Size.y};
@@ -280,11 +296,6 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
 }
 
 void ClientReset(void *) { ImGui_ImplRenderWare_Shutdown(); }
-
-void Hooked_AND_TouchEvent(int type, int finger, int x, int y) {
-    if (!g_Coordinator.ProcessTouch(type, finger, static_cast<float>(x), static_cast<float>(y)) && orig_AND_TouchEvent)
-        orig_AND_TouchEvent(type, finger, x, y);
-}
 
 void RenderFrame() {
     if (!g_ppEngine || !*g_ppEngine || !g_ppRenderQueue || !*g_ppRenderQueue)
@@ -314,8 +325,8 @@ void RenderFrame() {
     }
     g_LastRenderTime = currentClockMS;
 
-    const auto screen = DetectTouchScreenSize({width, height});
-    g_Coordinator.Frame(width, height, deltaTime, screen.width, screen.height);
+    g_frameTouchSize = DetectTouchScreenSize({width, height});
+    g_Coordinator.Frame(width, height, deltaTime, g_frameTouchSize.width, g_frameTouchSize.height);
 }
 
 void Hooked_MobileMenuRender(void *menu) {
@@ -331,16 +342,6 @@ void Hooked_ShutdownRenderWare() {
 }
 
 void InstallProviderHooks() {
-    void *pTouchSym = (void *)aml->GetSym(GetMainLibrary(), "_Z14AND_TouchEventiiii");
-#ifndef AML64
-    if (!pTouchSym)
-        pTouchSym = reinterpret_cast<void *>(GetMainLibraryAddress() + 0x2697C0);
-#endif
-    if (pTouchSym) {
-        aml->Hook(pTouchSym, reinterpret_cast<void *>(&Hooked_AND_TouchEvent),
-                  reinterpret_cast<void **>(&orig_AND_TouchEvent));
-    }
-
     // Hook render loop (2D pass and pause menu)
     Events::drawingEvent.after += RenderFrame;
 
@@ -450,7 +451,13 @@ void ImGui_ImplRenderWare_FormatTouch(const ImGuiShared::TouchSample &sample, ch
                   sample.screenW, sample.screenH, sample.renderW, sample.renderH);
 }
 
-bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback) {
+void ImGui_ImplRenderWare_SetDirectTouchCapture(bool capture) { g_directTouchCapture = capture; }
+
+bool ImGui_ImplRenderWare_RouteTouch(int action, int track, int x, int y) {
+    return g_routeLocal.load() && g_Coordinator.ProcessTouch(action, track, static_cast<float>(x), static_cast<float>(y));
+}
+
+bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback, ImGui_TouchCallback inputCallback) {
     if (g_bInitialized)
         return true;
 
@@ -466,6 +473,7 @@ bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback) {
     ImGui::StyleColorsDark();
 
     g_UserRenderCallback = renderCallback;
+    g_UserTouchCallback = inputCallback;
 
     if (!ImGui_ImplRenderWare_InitRenderer()) {
         ImGui::DestroyContext(g_pImGuiContext);
@@ -483,6 +491,7 @@ bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback) {
         return false;
     }
 
+    g_routeLocal.store(g_pSharedAPI->state == &g_Coordinator);
     g_bInitialized = true;
     logger->Info("ImGui/RW: initialized successfully");
     return true;
@@ -492,6 +501,7 @@ void ImGui_ImplRenderWare_Shutdown() {
     if (!g_bInitialized)
         return;
 
+    g_routeLocal.store(false);
     if (g_hClient)
         g_pSharedAPI->remove(g_pSharedAPI->state, g_hClient);
     g_hClient = 0;

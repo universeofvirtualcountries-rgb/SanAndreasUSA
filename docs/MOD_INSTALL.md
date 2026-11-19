@@ -53,7 +53,9 @@ Grant storage permission to the game, otherwise the mod cannot write
    semi-transparent **[USA 1:1]** pill at the top center (tap again to close).
 4. `Polygon` tab → *Start polygon* spawns the endless road with a yellow marker
    every 200 m at `content.generation_z` (300 m by default, clamped to 50–900).
-   You start 2 m above the road. Drive it and watch `Origin shifts` in Telemetry.
+   You start 2 m above a ready road; if the tile underneath is missing, the
+   mod pins you at `generation_z + 1.5` until its collision is ready. Drive
+   it and watch `Origin shifts` in Telemetry.
 5. `Teleports` tab → jump to New York / Washington / Las Vegas / Los Angeles.
 6. `Missions` tab → start a JSON mission. The state is saved in `world_delta.json`.
 7. Short status messages ("Entering shop...", "Mission complete", "+$2500")
@@ -99,14 +101,16 @@ full mission re-sync.
 * **No overlay** — check the AML log (`logcat | grep USA1to1`) for
   `Overlay: ImGui RenderWare backend failed to initialise`; the mod keeps running
   headless and streaming still works.
-* **Taps miss** — look for `touch raw … -> imgui` in Telemetry / `logcat`. It
+* **Taps miss** — open the menu and tap: the top status line and `logcat` show
+  `Tap raw=(x,y) -> imgui=(ix,iy) hovered=...`. The `touch raw … -> imgui`
+  line in Telemetry describes the shared hit-test path (e.g. the closed pill). It
   reports the touch-space size, render size and scale factors. By default
   (`ui.screen_width` and `ui.screen_height` both `0`), the backend uses the
   EGL draw surface, a zero-origin `GL_VIEWPORT`, or `RsGlobal`, in that order.
   If those sizes differ from Android's touch coordinates, set **both** axes
   in `config.json` (e.g. add `"screen_width": 2400, "screen_height": 1080`
-  to the `"ui"` object) and restart the game. If another mod owns an already
-  scaling shared ImGui provider, that provider controls the mapping.
+  to the `"ui"` object) and restart the game. An older shared ImGui provider
+  installed by another mod may still control hit-testing for the closed pill.
 * **Nothing spawns** — look for `Adapter: catalogue=…`, then the rejection counts
   and the first eight `ms_modelInfoPtrs` slots if the catalogue is empty. Compare
   `requested`, `loaded`, and `failed` in the `ChunkStreamer` and `TestPolygon` logs.

@@ -95,11 +95,13 @@ Our own JNI use (CloudSync) is different: it attaches the worker thread with
 | --- | --- | --- |
 | `CGame::Process` | `_ZN5CGame7ProcessEv` | per-frame tick: floating origin, streaming, missions, cloud poll |
 | `CGame::Shutdown` | `_ZN5CGame8ShutdownEv` | teardown: save delta, destroy objects, hide markers, ImGui shutdown |
-| `AND_TouchEvent` | `_Z14AND_TouchEventiiii` | two-finger swipe gesture for the overlay |
+| `AND_TouchEvent` | `_Z14AND_TouchEventiiii` | direct menu input, pill routing and swipe gesture |
 | RenderWare frame | AML ImGui backend (`ImGui_ImplRenderWare_Init`) | draws the overlay between `NewFrame()` and `Render()` |
 
-Hooks are installed with `aml->Hook(target, replacement, &original)`; the trampoline
-always calls the original afterwards so the game keeps running normally.
+Hooks are installed with `aml->Hook(target, replacement, &original)`. The
+adapter is this mod's only touch hook; it forwards unclaimed events to the game.
+While the menu is open it routes raw pixels to a render-thread queue, applies
+`ScreenToRender` and reports `Tap raw=(x,y) -> imgui=(ix,iy) hovered=...`.
 
 ## 3. Player, vehicle, camera
 
@@ -123,6 +125,9 @@ always calls the original afterwards so the game keeps running normally.
   The adapter re-reads the GOT indirection (which FLA may relocate) rather than
   keeping catalogue-time model pointers. Chunks retry asynchronously; polygon
   enable and interior entry each flush at most once, then also retry on ticks.
+* Call `_ZN7CObject6CreateEib` as `CObject *(*)(int, bool)` with `false` for the
+  second parameter. If that leaves no RW instance, create it explicitly via
+  `CEntity::CreateRwObject` before inserting the object.
 * Before `CWorld::Add`, check both live model resources again and check the
   `CObject` instance's own `m_pRwObject`. A rejected allocation is destroyed in
   the pool without `CWorld::Remove` because it was never inserted. `Teleport`
@@ -162,13 +167,17 @@ configured table limit. Both paths require a matching static-model type, a
 bounded model name, a valid draw distance and a collision box. The road is
 selected from the native road-flagged table entries, then the whitelist, the
 `RoadFlat` bucket, and finally the largest suitable flat collision footprint.
-All tiers exclude `dyn_` and `object.dat` props and require a road/terrain name
-hint plus a flat collision footprint strictly above 25 m².
+All tiers restrict road IDs to **3000–18000**, exclude `dyn_` and `object.dat`
+props and require a road/terrain name hint or native road flag plus a flat
+collision footprint strictly above 25 m².
 
 The polygon uses a flat `content.generation_z`; chunk props and markers use
 that base plus deterministic terrain relief. The polygon moves the player to
 `generation_z + 2` on entry and after an origin shift, and recovers a fall
-below `generation_z - 5` while active.
+below `generation_z - 5` while active. Until the actual supporting tile is
+ready, it pins the player (and player vehicle, if any) at `generation_z + 1.5`
+and zeros linear velocity. It checks that a downward collision query at the
+player's XY hits the supporting slab; other tiles do not release the hold.
 
 ## 8. Version differences handled
 

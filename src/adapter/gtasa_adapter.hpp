@@ -21,6 +21,10 @@
 
 struct CBaseModelInfo;
 struct CObject;
+struct CEntity;
+struct CVector;
+struct CColPoint;
+struct CStoredCollPoly;
 
 namespace usa1to1 {
 namespace adapter {
@@ -28,7 +32,7 @@ namespace adapter {
 class GTASAAdapter final : public core::IEngineBridge {
   public:
     using TickCallback = std::function<void(double dt)>;
-    using TouchCallback = std::function<void(int action, int track, int x, int y)>;
+    using TouchCallback = std::function<bool(int action, int track, int x, int y)>;
     using ShutdownCallback = std::function<void()>;
 
     GTASAAdapter();
@@ -76,6 +80,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     bool IsGameReady() override;
     bool GetPlayerPosition(core::Vec3f &out) override;
     void SetPlayerPosition(const core::Vec3f &pos) override;
+    void HoldPlayerPosition(const core::Vec3f &pos) override;
     void RecoverPlayerPosition(const core::Vec3f &pos) override;
     bool IsPlayerInVehicle() override;
     float GetFps() override;
@@ -93,6 +98,8 @@ class GTASAAdapter final : public core::IEngineBridge {
     void FlushModelStreaming() override;
 
     core::ObjectHandle CreateObject(const core::SpawnParams &params) override;
+    bool IsObjectCollisionReady(core::ObjectHandle handle) override;
+    bool HasRoadSupportAt(core::ObjectHandle handle, const core::Vec3f &surface) override;
     void DestroyObject(core::ObjectHandle handle) override;
     void MoveObject(core::ObjectHandle handle, const core::Vec3f &pos) override;
     size_t OwnedObjectCount() const override { return m_owned.size(); }
@@ -111,7 +118,7 @@ class GTASAAdapter final : public core::IEngineBridge {
 
     // ---- hook entry points (called from the static trampolines) -----------
     void OnGameProcess();
-    void OnTouch(int action, int track, int x, int y);
+    bool OnTouch(int action, int track, int x, int y);
     void OnGameShutdown();
 
   private:
@@ -176,6 +183,10 @@ class GTASAAdapter final : public core::IEngineBridge {
     float m_fps = 0.0f;
 
     int m_modelIdLimit = 20000;
+    CObject *(*m_createObject)(int, bool) = nullptr;
+    void (*m_createRwObject)(CEntity *) = nullptr;
+    bool (*m_processVerticalLine)(const CVector &, float, CColPoint &, CEntity *&,
+                                  bool, bool, bool, bool, bool, bool, CStoredCollPoly *) = nullptr;
     void *m_modelByName = nullptr;
     CBaseModelInfo **m_exportedModelTable = nullptr;
     std::unordered_map<int, double> m_nextUnreadyLog;

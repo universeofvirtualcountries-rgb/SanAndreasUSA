@@ -238,6 +238,8 @@ const ModelProto *ModelCatalog::PickByTag(PropTag tag, uint64_t rngValue) const 
 }
 
 bool IsFlatRoadCandidate(const ModelProto &p) {
+    if (!IsRoadSlabId(p.id))
+        return false; // never use small game props or unverified out-of-range IDs
     const Vec3f &h = p.colHalfExtents;
     const float minSpan = std::min(h.x, h.y);
     const double area = 4.0 * h.x * h.y;
@@ -248,10 +250,11 @@ bool IsFlatRoadCandidate(const ModelProto &p) {
     const std::string name = Lower(p.name);
     if (name.rfind("dyn_", 0) == 0)
         return false;
-    for (const char *hint : {"road", "ground", "highway", "bridge", "runway", "desert", "veg_", "ce_", "lae", "sfe", "vgw"})
+    for (const char *hint : {"road", "ground", "highway", "bridge", "runway", "platform", "desert", "freeway", "carpark"})
         if (name.find(hint) != std::string::npos)
             return true;
-    return false;
+    // Regional filename fragments alone do not establish a walkable surface.
+    return p.isRoad;
 }
 
 const ModelProto *ModelCatalog::PickRoad(int tableRoad, int whitelistRoad) const {

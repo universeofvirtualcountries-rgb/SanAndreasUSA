@@ -95,6 +95,10 @@ else()
 
     add_executable(usa1to1_tests
         tests/test_main.cpp
+        mod/thirdparty/imgui/imgui.cpp
+        mod/thirdparty/imgui/imgui_draw.cpp
+        mod/thirdparty/imgui/imgui_tables.cpp
+        mod/thirdparty/imgui/imgui_widgets.cpp
         plugin-sdk/renderware/imgui/imgui_shared.cpp
     )
     target_link_libraries(usa1to1_tests PRIVATE usa1to1_core)

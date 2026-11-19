@@ -8,11 +8,14 @@
 // Called every rendered frame between ImGui::NewFrame() and ImGui::Render().
 // The callback owns all UI policy: which windows exist, and when they are shown.
 typedef void (*ImGui_RenderCallback)();
+// Runs on the render thread before NewFrame, with current screen and render extents.
+using ImGui_TouchCallback = void (*)(int screenW, int screenH, int renderW, int renderH);
 
-// Creates this plugin's ImGui context and resolves RenderWare symbols. The first plugin to initialize hooks
-// touch, 2D render, pause-menu render and RenderWare shutdown; later plugins share those hooks, and the plugin
-// whose window is touched draws on top. Touches inside ImGui windows go to ImGui; all others reach the game.
-bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback = nullptr);
+// Initializes the shared rendering hooks. The adapter owns AND_TouchEvent and
+// calls RouteTouch for ordinary hit-testing when the direct menu path did not consume it.
+bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback, ImGui_TouchCallback inputCallback);
+bool ImGui_ImplRenderWare_RouteTouch(int action, int track, int x, int y);
+void ImGui_ImplRenderWare_SetDirectTouchCapture(bool capture);
 
 // Destroys the ImGui context and its textures. Hooks stay installed and pass input through to the game.
 void ImGui_ImplRenderWare_Shutdown();
