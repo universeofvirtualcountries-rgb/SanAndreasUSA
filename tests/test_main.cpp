@@ -12,6 +12,7 @@
 #include "core/json.hpp"
 #include "core/log.hpp"
 #include "core/safe.hpp"
+#include "core/spawn_validation.hpp"
 #include "core/screen_to_render.hpp"
 #include "core/status_feed.hpp"
 #include "core/mission.hpp"
@@ -491,6 +492,35 @@ TEST(streamer_retries_props_until_models_load) {
     streamer.Update(Vec2d(100.0, 100.0), Vec2d(0.0, 0.0));
     CHECK(streamer.PendingCount() == 0);
     CHECK(streamer.ObjectCount() > 0);
+}
+
+TEST(streamer_keeps_prop_if_readiness_is_lost_during_creation) {
+    class FlakyBridge : public test::MockBridge {
+      public:
+        bool failOnce = true;
+        int staleId = -1;
+        ObjectHandle CreateObject(const SpawnParams &params) override {
+            if (failOnce) {
+                failOnce = false;
+                staleId = params.modelId;
+                loadedModels.erase(staleId);
+                return {};
+            }
+            return MockBridge::CreateObject(params);
+        }
+    } bridge;
+    ChunkGenerator gen(MakeTestCatalog());
+    ChunkStreamer::Config cfg;
+    cfg.radius = 0;
+    cfg.maxSpawnsPerUpdate = 100;
+    ChunkStreamer streamer(bridge, gen, cfg);
+    streamer.Update({100, 100}, {});
+    const size_t pending = streamer.PendingCount(), spawned = streamer.ObjectCount();
+    CHECK(bridge.staleId >= 0 && pending > 0 && bridge.flushes == 0);
+    bridge.loadedModels.insert(bridge.staleId);
+    streamer.Update({100, 100}, {});
+    CHECK(streamer.PendingCount() == 0);
+    CHECK(streamer.ObjectCount() == spawned + pending && bridge.flushes == 0);
 }
 
 TEST(streamer_finds_door_marker) {
@@ -1018,6 +1048,7 @@ TEST(road_selection_uses_table_whitelist_tags_then_largest_flat_collision) {
     auto candidate = [](int id, PropTag tag, Vec3f half, bool collidable = true) {
         ModelProto p;
         p.id = id;
+        p.name = "ground_test_" + std::to_string(id);
         p.tag = tag;
         p.colHalfExtents = half;
         p.hasCollision = collidable;
@@ -1037,6 +1068,99 @@ TEST(road_selection_uses_table_whitelist_tags_then_largest_flat_collision) {
     CHECK(pick(cat.PickRoad()) == 30);
     cat.Clear();
     CHECK(!cat.PickRoad());
+}
+
+TEST(road_rejects_postbox_dynamic_and_unverified_flat_props) {
+    ModelProto slab;
+    slab.id = 4010;
+    slab.name = "CE_ground_test";
+    slab.colHalfExtents = {5.0f, 3.0f, 0.3f};
+    CHECK(IsFlatRoadCandidate(slab));
+
+    ModelProto postbox = slab;
+    postbox.id = 1429;
+    postbox.name = "DYN_postbox";
+    postbox.tag = PropTag::RoadFlat;
+    postbox.isRoad = true;
+    CHECK(!IsFlatRoadCandidate(postbox)); // even with a bogus road tag and large bounds
+    postbox.name = "DYN_roadbarrier";
+    CHECK(!IsFlatRoadCandidate(postbox));
+
+    ModelProto dynamicSlab = slab;
+    dynamicSlab.id = 4011;
+    dynamicSlab.name = "road_sfe_dynamic";
+    dynamicSlab.isDynamic = true;
+    CHECK(!IsFlatRoadCandidate(dynamicSlab));
+    ModelProto small = slab;
+    small.id = 4012;
+    small.colHalfExtents = {2.5f, 2.5f, 0.1f}; // exactly 25 m², not greater
+    CHECK(!IsFlatRoadCandidate(small));
+    ModelProto prop = slab;
+    prop.id = 4013;
+    prop.name = "test_sheet";
+    CHECK(!IsFlatRoadCandidate(prop));
+
+    ModelCatalog cat;
+    cat.AddModels({slab, postbox, dynamicSlab, small, prop});
+    CHECK(cat.PickRoad(1429, 4011) && cat.PickRoad(1429, 4011)->id == slab.id);
+}
+
+TEST(spawn_validation_requires_mapped_model_rw_collision_and_object_rw) {
+    struct FakeResource { int value = 42; } rw, col;
+    struct FakeModel { FakeResource *m_pRwObject; FakeResource *m_pColModel; } model{&rw, &col};
+    struct FakeObject { FakeResource *m_pRwObject; } object{&rw};
+    CHECK(HasMappedModelResources(&model));
+    CHECK(HasMappedObjectInstance(&object));
+    CHECK(!HasMappedModelResources(static_cast<FakeModel *>(nullptr)));
+    model.m_pColModel = nullptr;
+    CHECK(!HasMappedModelResources(&model));
+    model.m_pColModel = &col;
+    model.m_pRwObject = nullptr;
+    CHECK(!HasMappedModelResources(&model));
+    model.m_pRwObject = reinterpret_cast<FakeResource *>(0x595);
+    CHECK(!HasMappedModelResources(&model));
+    object.m_pRwObject = nullptr;
+    CHECK(!HasMappedObjectInstance(&object));
+    object.m_pRwObject = reinterpret_cast<FakeResource *>(0x595);
+    CHECK(!HasMappedObjectInstance(&object));
+}
+
+TEST(polygon_defers_unready_road_and_flushes_only_once) {
+    class DelayedBridge : public test::MockBridge {
+      public:
+        bool ready = false;
+        bool IsModelLoaded(int) override { return ready; }
+    } bridge;
+    bridge.roadModel = 1429; // a probe result absent from the verified catalogue must not be used
+    TestPolygon polygon(bridge, MakeTestCatalog());
+    CHECK(polygon.Enable({}, {}));
+    CHECK(polygon.RoadModel() == 3001 && !polygon.HasVisuals());
+    CHECK(bridge.created == 0 && bridge.flushes == 1);
+    polygon.Update({}, {});
+    CHECK(bridge.created == 0 && bridge.flushes == 1);
+    bridge.ready = true;
+    polygon.Update({}, {});
+    CHECK(polygon.HasVisuals() && bridge.created > 0 && bridge.flushes == 1);
+}
+
+TEST(interior_defers_unready_props_and_flushes_only_once) {
+    class DelayedBridge : public test::MockBridge {
+      public:
+        bool ready = false;
+        bool IsModelLoaded(int) override { return ready; }
+    } bridge;
+    InteriorGenerator generator(MakeTestCatalog());
+    InteriorManager interior(bridge, generator);
+    WorldDelta delta;
+    CHECK(interior.Enter(27, {}, delta));
+    CHECK(bridge.created == 0 && bridge.flushes == 1);
+    interior.Update({100, 100, bridge.player.z}, delta);
+    CHECK(bridge.created == 0 && bridge.flushes == 1);
+    bridge.ready = true;
+    interior.Update({100, 100, bridge.player.z}, delta);
+    CHECK(interior.ObjectCount() > 0 && bridge.flushes == 1);
+    interior.Exit(delta);
+    CHECK(bridge.objects.empty());
 }
 
 TEST(shipped_model_whitelist_has_named_road_and_non_road_entries) {
@@ -1091,7 +1215,7 @@ TEST(polygon_reports_markers_only_if_road_request_fails) {
     } bridge;
     TestPolygon polygon(bridge, MakeTestCatalog());
     CHECK(polygon.Enable({}, {}));
-    CHECK(polygon.RoadModel() == 5000);
+    CHECK(polygon.RoadModel() == 3001);
     CHECK(!polygon.HasVisuals() && polygon.MarkerCount() > 0);
     CHECK(bridge.player.z == 302.0f);
     polygon.Disable();
@@ -1145,7 +1269,11 @@ TEST(streamer_drops_rejected_or_timed_out_models_and_releases_only_accepted_requ
 
 TEST(polygon_spawns_endless_road_with_200m_markers) {
     test::MockBridge bridge;
-    const ModelCatalog cat = MakeTestCatalog();
+    ModelCatalog cat = MakeTestCatalog();
+    ModelProto preferred = *cat.Find(3001);
+    preferred.id = bridge.roadModel;
+    preferred.name = "test_ground_tile";
+    cat.Add(preferred);
     TestPolygon polygon(bridge, cat);
     CHECK(!polygon.Active());
 

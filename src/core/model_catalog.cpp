@@ -240,9 +240,18 @@ const ModelProto *ModelCatalog::PickByTag(PropTag tag, uint64_t rngValue) const 
 bool IsFlatRoadCandidate(const ModelProto &p) {
     const Vec3f &h = p.colHalfExtents;
     const float minSpan = std::min(h.x, h.y);
-    return p.hasCollision && !p.isDynamic && std::isfinite(p.drawDistance) && p.drawDistance >= 30.0f &&
-           std::isfinite(h.x) && std::isfinite(h.y) && std::isfinite(h.z) &&
-           minSpan >= 2.5f && h.z >= 0.0f && h.z <= 1.0f && h.z <= minSpan * 0.15f;
+    const double area = 4.0 * h.x * h.y;
+    if (!p.hasCollision || p.isDynamic || !std::isfinite(p.drawDistance) || p.drawDistance < 30.0f ||
+        !std::isfinite(h.x) || !std::isfinite(h.y) || !std::isfinite(h.z) ||
+        minSpan < 2.5f || area <= 25.0 || h.z < 0.0f || h.z > 1.0f || h.z > minSpan * 0.15f)
+        return false;
+    const std::string name = Lower(p.name);
+    if (name.rfind("dyn_", 0) == 0)
+        return false;
+    for (const char *hint : {"road", "ground", "highway", "bridge", "runway", "desert", "veg_", "ce_", "lae", "sfe", "vgw"})
+        if (name.find(hint) != std::string::npos)
+            return true;
+    return false;
 }
 
 const ModelProto *ModelCatalog::PickRoad(int tableRoad, int whitelistRoad) const {
@@ -253,9 +262,9 @@ const ModelProto *ModelCatalog::PickRoad(int tableRoad, int whitelistRoad) const
         if (IsFlatRoadCandidate(*p))
             return p;
     const ModelProto *best = nullptr;
-    float area = 0.0f;
+    double area = 0.0;
     for (const auto &p : m_protos) {
-        const float footprint = p.colHalfExtents.x * p.colHalfExtents.y;
+        const double footprint = 4.0 * p.colHalfExtents.x * p.colHalfExtents.y;
         if (IsFlatRoadCandidate(p) && footprint > area) {
             best = &p;
             area = footprint;

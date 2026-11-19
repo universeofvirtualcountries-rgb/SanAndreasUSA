@@ -118,15 +118,19 @@ always calls the original afterwards so the game keeps running normally.
 
 ## 4. Streaming and object lifecycle
 
-* `CStreaming::RequestModel(id, 0)` to request, `CStreaming::ms_aInfoForModel[id].m_status == 1`
-  to test readiness (bounds-checked against `content.model_id_limit`),
-  `CStreaming::SetModelIsDeletable(id)` to release.
-* Spawn: `CObject::Create(modelId, true)` → static/collision flags → final
-  rotation and position → `UpdateRwFrame()` → `CWorld::Add(obj)`.
+* `CStreaming::RequestModel(id, 0)` queues the model. A spawn requires streaming
+  status `1` **and** mapped `m_pRwObject` / `m_pColModel` in the live model slot.
+  The adapter re-reads the GOT indirection (which FLA may relocate) rather than
+  keeping catalogue-time model pointers. Chunks retry asynchronously; polygon
+  enable and interior entry each flush at most once, then also retry on ticks.
+* Before `CWorld::Add`, check both live model resources again and check the
+  `CObject` instance's own `m_pRwObject`. A rejected allocation is destroyed in
+  the pool without `CWorld::Remove` because it was never inserted. `Teleport`
+  on world objects is guarded too: it can internally remove and re-add them.
+  Look for `skipping unready modelId=...` in the log (rate limited per model).
 * Despawn: `CWorld::Remove(obj)` → native destructor via the plugin-sdk shim →
-  `CPools::ms_pObjectPool->Delete(obj)` → `SetModelIsDeletable(modelId)`.
-  The slot is validated with `CPools::ms_pObjectPool->IsObjectValid()` first, so a
-  slot already reclaimed by the game (restart, interior change) never gets double-freed.
+  `CPools::ms_pObjectPool->Delete(obj)`. The request owner releases the model
+  through `CStreaming::SetModelIsDeletable(id)` when it unloads.
 * Markers: `C3dMarkers::PlaceMarker(...)` with type `MARKER3D_CYLINDER`, yellow
   (255, 214, 0), alpha 200. Slots are recycled from a fixed pool of 12 engine ids —
   the engine marker array is tiny and its size differs between game versions, so the
@@ -158,6 +162,8 @@ configured table limit. Both paths require a matching static-model type, a
 bounded model name, a valid draw distance and a collision box. The road is
 selected from the native road-flagged table entries, then the whitelist, the
 `RoadFlat` bucket, and finally the largest suitable flat collision footprint.
+All tiers exclude `dyn_` and `object.dat` props and require a road/terrain name
+hint plus a flat collision footprint strictly above 25 m².
 
 The polygon uses a flat `content.generation_z`; chunk props and markers use
 that base plus deterministic terrain relief. The polygon moves the player to

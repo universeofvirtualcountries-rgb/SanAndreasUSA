@@ -28,15 +28,12 @@ int64_t TestPolygon::TileIndexAt(double globalY) const {
 bool TestPolygon::Enable(const Vec2d &playerGlobal, const Vec2d &origin) {
     Disable();
     m_roadX = playerGlobal.x;
-    m_roadModel = m_bridge.ProbeRoadModel();
-    if (m_roadModel < 0) {
-        if (const auto *road = m_catalog.PickRoad())
-            m_roadModel = road->id;
-    }
+    const auto *road = m_catalog.PickRoad(m_bridge.ProbeRoadModel());
+    m_roadModel = road ? road->id : -1;
     m_tileLength = m_config.tileLength;
     m_tileHeading = 0.0f;
     m_tileOffset = {};
-    if (const auto *road = m_catalog.Find(m_roadModel); road && IsFlatRoadCandidate(*road)) {
+    if (road) {
         // Use the longest collision axis along travel. Align the top of the
         // collision box to generationZ, even if the DFF pivot is offset.
         const bool rotate = road->colHalfExtents.x > road->colHalfExtents.y;

@@ -2,10 +2,12 @@
 
 #include "core/log.hpp"
 #include "core/safe.hpp"
+#include "core/spawn_validation.hpp"
 
 #include <cfloat> // FLT_EPSILON, used by plugin-sdk/gta_base/Vector.h
 
 #include <plugin-sdk/game_sa/Events.h>
+#include <plugin-sdk/game_sa/base/ColModel.h>
 #include <plugin-sdk/game_sa/base/Matrix.h>
 #include <plugin-sdk/game_sa/base/Timer.h>
 #include <plugin-sdk/game_sa/engine/Cam.h>
@@ -19,6 +21,7 @@
 #include <plugin-sdk/game_sa/entity/PlayerPed.h>
 #include <plugin-sdk/game_sa/entity/Vehicle.h>
 #include <plugin-sdk/game_sa/other/Pools.h>
+#include <plugin-sdk/renderware/RwObject.h>
 
 #include <mod/amlmod.h>
 
@@ -166,7 +169,8 @@ bool GTASAAdapter::VerifyEngineSymbols() {
     m_syms.flushModels = Symbol("_ZN10CStreaming22LoadAllRequestedModelsEb") != nullptr;
     m_syms.worldAdd = Symbol("_ZN6CWorld3AddEP7CEntity") != nullptr;
     m_syms.worldRemove = Symbol("_ZN6CWorld6RemoveEP7CEntity") != nullptr;
-    m_syms.objectCreate = Symbol("_ZN7CObject6CreateEib") != nullptr;
+    m_syms.objectCreate = Symbol("_ZN7CObject6CreateEib") && Symbol("_ZN7CObjectD2Ev");
+    m_exportedModelTable = static_cast<CBaseModelInfo **>(Symbol("_ZN10CModelInfo16ms_modelInfoPtrsE"));
     m_modelByName = Symbol("_ZN10CModelInfo12GetModelInfoEPKcPi");
     m_syms.modelInfo = m_modelByName != nullptr;
     m_syms.findPlayer = Symbol("_Z13FindPlayerPedi") != nullptr;
@@ -553,16 +557,14 @@ int GTASAAdapter::ShiftStreamedEntities(const Vec3f &delta, bool includeInterior
         OwnedObject &obj = kv.second;
         if (obj.interior && !includeInterior)
             continue;
-        CEntity *ent = reinterpret_cast<CEntity *>(obj.pointer);
-        if (!ent)
+        auto *object = reinterpret_cast<CObject *>(kv.first);
+        if (auto *pool = CPools::ms_pObjectPool; !pool || !pool->IsObjectValid(object))
             continue;
-        const CVector pos = ent->GetPosition();
-        ent->Teleport(CVector(pos.x + d.x, pos.y + d.y, pos.z + d.z), false);
-        ent->UpdateRwFrame();
-        obj.pos.x += delta.x;
-        obj.pos.y += delta.y;
-        obj.pos.z += delta.z;
-        ++moved;
+        const Vec3f target = ToVec3(object->GetPosition() + d);
+        if (MoveWorldObject(object, obj.modelId, target)) {
+            obj.pos = target;
+            ++moved;
+        }
     }
 
     // 2) Our 3D markers (doors, polygon rings, exit markers).
@@ -589,9 +591,8 @@ int GTASAAdapter::ShiftStreamedEntities(const Vec3f &delta, bool includeInterior
             const CVector pos = o->GetPosition();
             if (IsInteriorZ(pos.z) || o->m_nInterior != 0)
                 continue;
-            o->Teleport(CVector(pos.x + d.x, pos.y + d.y, pos.z + d.z), false);
-            o->UpdateRwFrame();
-            ++moved;
+            if (MoveWorldObject(o, o->m_nModelIndex, ToVec3(pos + d)))
+                ++moved;
         }
     }
     return moved;
@@ -601,6 +602,36 @@ int GTASAAdapter::ShiftStreamedEntities(const Vec3f &delta, bool includeInterior
 // Streaming
 // ---------------------------------------------------------------------------
 
+CBaseModelInfo **GTASAAdapter::LiveModelTable() const {
+    // The GOT indirection can be repointed by a limit adjuster. Read it
+    // again rather than caching model entries or preferring the ELF export.
+    auto ***slot = reinterpret_cast<CBaseModelInfo ***>(m_gameBase + BYBIT(0x6796D4, 0x850DB8));
+    if (IsMappedRange(slot, sizeof(*slot))) {
+        auto **table = *slot;
+        if (IsMappedRange(table, sizeof(*table)))
+            return table;
+    }
+    return m_exportedModelTable;
+}
+
+const CBaseModelInfo *GTASAAdapter::LiveModelInfo(int modelId) const {
+    CBaseModelInfo *info = nullptr;
+    if (modelId < 0 || modelId >= ModelScanLimit() ||
+        !IsUsableTableEntry(LiveModelTable(), modelId, info, sizeof(*info)))
+        return nullptr;
+    return info;
+}
+
+namespace {
+CStreamingInfo *LiveStreamingInfo(uintptr_t gameBase, int id) {
+    auto **slot = reinterpret_cast<CStreamingInfo **>(gameBase + BYBIT(0x677DD8, 0x84DBD0));
+    if (!IsMappedRange(slot, sizeof(*slot)) || !IsSanePointer(*slot))
+        return nullptr;
+    auto *entry = *slot + id;
+    return IsMappedRange(entry, sizeof(*entry)) ? entry : nullptr;
+}
+} // namespace
+
 bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
     (void)dynamic;
     if (!m_runtimeReady || !m_syms.streaming || !m_syms.requestModel)
@@ -609,7 +640,7 @@ bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
         return false;
     if (!CStreaming::IsInitialised())
         return false;
-    if (!core::IsMappedRange(&CStreaming::ms_aInfoForModel[modelId], sizeof(CStreamingInfo)))
+    if (!LiveStreamingInfo(m_gameBase, modelId) || !LiveModelInfo(modelId))
         return false;
     CStreaming::RequestModel(modelId, 0);
     return true;
@@ -622,12 +653,14 @@ bool GTASAAdapter::IsModelLoaded(int modelId) {
         return false;
     if (!CStreaming::IsInitialised())
         return false;
-    // ms_aInfoForModel is a fixed-address global; validate the slot before the
-    // read so a wrong game build disables streaming instead of faulting.
-    CStreamingInfo *entry = &CStreaming::ms_aInfoForModel[modelId];
-    if (!core::IsMappedRange(entry, sizeof(CStreamingInfo)))
+    const auto *entry = LiveStreamingInfo(m_gameBase, modelId);
+    if (!entry || entry->m_status != 1)
         return false;
-    return entry->m_status == 1;
+    if (!HasMappedModelResources(LiveModelInfo(modelId))) {
+        LogUnreadyModel(modelId, "streaming status loaded but model RwObject/COL is missing or unmapped");
+        return false;
+    }
+    return true;
 }
 
 void GTASAAdapter::ReleaseModel(int modelId) {
@@ -651,16 +684,36 @@ void GTASAAdapter::FlushModelStreaming() {
 // Objects
 // ---------------------------------------------------------------------------
 
-ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
-    if (!m_syms.objectCreate || !m_syms.worldAdd || !m_syms.worldRemove ||
-        params.modelId < 0 || params.modelId >= ModelScanLimit())
-        return {};
-    if (!IsModelLoaded(params.modelId))
-        return {};
+void GTASAAdapter::LogUnreadyModel(int modelId, const char *reason) {
+    const double now = MonotonicSeconds();
+    auto &next = m_nextUnreadyLog[modelId];
+    if (now >= next) {
+        USA_LOG_W("Adapter: skipping unready modelId=%d (%s)", modelId, reason);
+        next = now + 5.0;
+    }
+}
 
-    CObject *obj = CObject::Create(params.modelId, true);
+ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
+    const int id = params.modelId;
+    if (!m_syms.objectCreate || !m_syms.worldAdd || !m_syms.worldRemove ||
+        id < 0 || id >= ModelScanLimit())
+        return {};
+    // No synchronous flush here: the caller keeps the request pending across
+    // ticks. A loaded streaming slot alone is not sufficient to construct it.
+    if (!IsModelLoaded(id)) {
+        LogUnreadyModel(id, "not ready for CObject::Create");
+        return {};
+    }
+
+    CObject *obj = CObject::Create(id, true);
     if (!obj)
         return {};
+
+    if (!HasMappedObjectInstance(obj) || obj->m_nModelIndex != id) {
+        LogUnreadyModel(id, "CObject has no mapped RwObject or unexpected model index after Create");
+        DeletePoolObject(obj, false);
+        return {};
+    }
 
     obj->bIsStatic = !params.dynamic;
     obj->bApplyGravity = params.dynamic;
@@ -673,50 +726,61 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
         obj->m_placement.m_fHeading = params.headingRad;
     obj->GetPosition() = ToCV(params.pos);
     obj->UpdateRwFrame();
+
+    // Look up the live slot again: neither a catalogue-time COL nor a
+    // successful Create proves both model and instance are safe for Add.
+    if (!HasMappedModelResources(LiveModelInfo(id)) || !HasMappedObjectInstance(obj)) {
+        LogUnreadyModel(id, "model or instance resources missing before CWorld::Add");
+        DeletePoolObject(obj, false);
+        return {};
+    }
     CWorld::Add(obj);
 
-    OwnedObject owned;
-    owned.pointer = reinterpret_cast<uintptr_t>(obj);
-    owned.modelId = params.modelId;
-    owned.interior = params.interior;
-    owned.pos = params.pos;
-    m_owned[owned.pointer] = owned;
-    return ObjectHandle{owned.pointer};
+    const auto handle = reinterpret_cast<uintptr_t>(obj);
+    m_owned[handle] = OwnedObject{id, params.interior, params.pos};
+    return ObjectHandle{handle};
+}
+
+void GTASAAdapter::DeletePoolObject(CObject *obj, bool inWorld) {
+    auto *pool = CPools::ms_pObjectPool;
+    if (!IsMappedRange(obj, sizeof(*obj)) || !pool || !pool->IsObjectValid(obj))
+        return; // the game may already have reclaimed the slot
+    if (inWorld)
+        CWorld::Remove(obj);
+    // A non-null but unmapped instance must not be dereferenced by the destructor.
+    if (!HasMappedObjectInstance(obj))
+        obj->m_pRwObject = nullptr;
+    obj->~CObject();
+    pool->Delete(obj);
 }
 
 void GTASAAdapter::DestroyObject(ObjectHandle handle) {
-    if (!handle.raw)
+    if (!m_owned.erase(handle.raw))
         return;
-    auto it = m_owned.find(handle.raw);
-    if (it == m_owned.end())
-        return;
+    DeletePoolObject(reinterpret_cast<CObject *>(handle.raw), true);
+    // Streaming requests are released by their chunk / polygon / interior owner.
+}
 
-    CObject *obj = reinterpret_cast<CObject *>(handle.raw);
-    const int modelId = it->second.modelId;
-    m_owned.erase(it);
-
-    if (!CPools::ms_pObjectPool || !CPools::ms_pObjectPool->IsObjectValid(obj)) {
-        return; // the game already reclaimed the slot (restart, interior change, ...)
+bool GTASAAdapter::MoveWorldObject(CObject *obj, int modelId, const Vec3f &pos) {
+    // The native Teleport path can remove and internally re-add a CObject.
+    if (!HasMappedObjectInstance(obj) || obj->m_nModelIndex != modelId ||
+        !HasMappedModelResources(LiveModelInfo(modelId))) {
+        LogUnreadyModel(modelId, "model or instance resources missing before CObject::Teleport");
+        return false;
     }
-
-    CWorld::Remove(obj);
-    // Native teardown order used by the game itself: remove from the world,
-    // run the destructor through the pipeline shim, then free the pool slot.
-    obj->~CObject();
-    CPools::ms_pObjectPool->Delete(obj);
-
-    if (modelId >= 0)
-        CStreaming::SetModelIsDeletable(modelId);
+    obj->Teleport(ToCV(pos), false);
+    obj->UpdateRwFrame();
+    return true;
 }
 
 void GTASAAdapter::MoveObject(ObjectHandle handle, const Vec3f &pos) {
     auto it = m_owned.find(handle.raw);
     if (it == m_owned.end())
         return;
-    CEntity *ent = reinterpret_cast<CEntity *>(handle.raw);
-    ent->Teleport(ToCV(pos), false);
-    ent->UpdateRwFrame();
-    it->second.pos = pos;
+    auto *obj = reinterpret_cast<CObject *>(handle.raw);
+    auto *pool = CPools::ms_pObjectPool;
+    if (pool && pool->IsObjectValid(obj) && MoveWorldObject(obj, it->second.modelId, pos))
+        it->second.pos = pos;
 }
 
 // ---------------------------------------------------------------------------
@@ -930,14 +994,7 @@ int GTASAAdapter::CountStreamedEntities() {
 // ---------------------------------------------------------------------------
 
 int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out, const std::string &assetDir) {
-    // Prefer the relocated array export: the SDK's fixed GOT slot is only a
-    // fallback for the versions whose offsets it describes.
-    auto **table = static_cast<CBaseModelInfo **>(Symbol("_ZN10CModelInfo16ms_modelInfoPtrsE"));
-    if (!table) {
-        auto ***slot = reinterpret_cast<CBaseModelInfo ***>(m_gameBase + BYBIT(0x6796D4, 0x850DB8));
-        if (IsMappedRange(slot, sizeof(*slot)))
-            table = *slot;
-    }
+    auto **table = LiveModelTable();
     const int limit = ModelScanLimit();
     auto lookup = reinterpret_cast<decltype(CModelInfo::GetModelInfo1)>(m_modelByName);
 
@@ -958,7 +1015,7 @@ int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out, const std::string &assetDi
             return false;
         }
         const void *vtable = nullptr;
-        std::memcpy(&vtable, info, sizeof(vtable));
+        std::memcpy(&vtable, static_cast<const void *>(info), sizeof(vtable));
         if (std::find(staticVtables.begin(), staticVtables.end(), vtable) == staticVtables.end()) {
             ++rejected.type;
             return false;
@@ -994,6 +1051,8 @@ int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out, const std::string &assetDi
         proto.name = info->m_szModelName;
         proto.drawDistance = info->m_fDrawDistance;
         proto.isRoad = info->bIsRoad;
+        // object.dat entries carry physics even though their model is atomic.
+        proto.isDynamic = info->m_nObjectInfoIndex >= 0;
         proto.colHalfExtents = half;
         proto.colOffset = center;
         proto.tag = ClassifyByName(LowerCopy(proto.name.c_str()), proto.isRoad, std::max(half.x, half.y));
@@ -1009,12 +1068,21 @@ int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out, const std::string &assetDi
             ++rejected.lookup;
             return false;
         }
+        if (LiveModelInfo(id) != info) {
+            ++rejected.slot; // avoid accepting a name from a different/relocated table
+            return false;
+        }
         return describe(id, info, &name, proto);
     };
 
     std::vector<ModelProto> models;
     std::unordered_set<int> ids;
     auto add = [&](ModelProto &&p) {
+        if ((p.isRoad || p.tag == PropTag::RoadFlat) && !IsFlatRoadCandidate(p)) {
+            p.isRoad = false;
+            if (p.tag == PropTag::RoadFlat)
+                p.tag = PropTag::Prop;
+        }
         if (ids.insert(p.id).second)
             models.push_back(std::move(p));
     };
