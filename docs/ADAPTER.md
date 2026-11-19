@@ -62,6 +62,22 @@ void *addr  = aml->GetSym(m_libHandle, "_ZN5CGame7ProcessEv");
 * Every symbol is resolved defensively: a missing export logs a warning and the
   related feature degrades instead of crashing.
 
+## 1.1 No AML JNI facades
+
+`aml->ShowToast()` and `aml->DoVibro()` are JNI facades: AML keeps a `JNIEnv`
+cached from the Java/UI thread and calls `CallVoidMethod` from whatever thread
+the mod happens to run on. On Android 15 / ART that aborts the process inside
+`art::JavaVMExt::JniAbort` (`Toast` also wants a `Looper`). The mod therefore
+never calls them:
+
+* `GTASAAdapter::ShowToast()` logs the message and pushes it into
+  `core::StatusFeed`; the ImGui overlay renders it (a 3 s centred banner and a
+  `status:` line in the telemetry tab).
+* `GTASAAdapter::Vibrate()` is a no-op with a debug log.
+
+Our own JNI use (CloudSync) is different: it attaches the worker thread with
+`AttachCurrentThread` and validates the `JavaVM`/`JNIEnv` interface tables first.
+
 ## 2. Hooks
 
 | Hook | Symbol | Purpose |

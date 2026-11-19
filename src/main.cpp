@@ -70,6 +70,7 @@ class ModApp {
     std::unique_ptr<net::CloudSync> m_cloud;
     ui::ImGuiOverlay m_overlay;
     TwoFingerSwipeDetector m_gesture;
+    CornerTapDetector m_cornerTap;
 
     ModelCatalog m_catalog;
     ModConfig m_config;
@@ -484,6 +485,15 @@ void ModApp::OnTick(double dt) {
 
 void ModApp::OnTouch(int action, int track, int x, int y) {
     const double now = m_adapter.NowSeconds();
+
+    // Corner tap first: it is the reliable way in when the game or a vendor
+    // touch layer eats the two-finger swipe before ImGui sees it.
+    if (m_cornerTap.Feed(action, track, x, y, now)) {
+        m_overlay.Toggle();
+        logger->Info("overlay %s (corner tap)", m_overlay.Visible() ? "opened" : "closed");
+        return;
+    }
+
     if (m_gesture.Feed(action, track, x, y, now)) {
         m_overlay.Toggle();
         logger->Info("overlay %s", m_overlay.Visible() ? "opened" : "closed");
@@ -518,6 +528,11 @@ void ModApp::UpdateTelemetry() {
     t.activeObjects = static_cast<int>(m_streamer->ObjectCount());
     t.streamedEntities = m_adapter.CountStreamedEntities();
     t.playerInterior = m_interiors->CurrentArea();
+
+    std::string status;
+    if (m_adapter.Status().Latest(status, m_adapter.NowSeconds()))
+        model.statusLine = status;
+    model.statusAgeSec = m_adapter.Status().LastAge(m_adapter.NowSeconds());
 
     model.regionLabel = "unknown";
     if (const RegionBox *region = FindRegion(t.globalX, t.globalY)) {
