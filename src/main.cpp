@@ -44,11 +44,15 @@ class ModApp {
     }
 
     void OnLoad();
+    void OnAllModsLoaded();
     void OnUnload();
     void OnTick(double dt);
     void OnTouch(int action, int track, int x, int y);
+    void OnGameCrash(const char *library, int sig, int code, uintptr_t libaddr);
 
   private:
+    bool EnsureLoaderStage();
+    void BootRuntime();
     void LoadConfig();
     void LoadCatalogue();
     void LoadMissions();
@@ -92,12 +96,18 @@ class ModApp {
     Vec3f m_lastPlayerPos;
     Vec2d m_lastGlobal;
     bool m_initialSpawnDone = false;
+    bool m_loaderStage = false;
+    bool m_runtimeReady = false;
+    int m_bootAttempts = 0;
     bool m_streamingEnabled = true;
     size_t m_shiftsThisFrame = 0;
     bool m_deltaDirty = false;
     bool m_ready = false;
 };
 
+// Stage 1. Runs inside OnModLoad: the loader is alive, the game engine and the
+// model info/pools may not be. Nothing here may touch engine state - only the
+// loader, the logger and our own files.
 void ModApp::OnLoad() {
     logger->SetTag("USA1to1");
     Log::SetSink([](LogLevel level, const std::string &msg) {
@@ -116,13 +126,10 @@ void ModApp::OnLoad() {
             break;
         }
     });
-    logger->Info("USA 1:1 Procedural Expansion loading...");
+    logger->Info("USA 1:1 Procedural Expansion loading (loader stage)...");
 
-    if (!m_adapter.Initialize()) {
-        logger->Error("adapter init failed: %s", m_adapter.LastError().c_str());
-        return;
-    }
-
+    // Paths first: ModDirectory only uses loader slots that existed long before
+    // the ones this mod is built against, and validates everything it gets back.
     m_modDir = m_adapter.ModDirectory();
     m_configPath = m_modDir + "/config.json";
     m_deltaPath = m_modDir + "/world_delta.json";
@@ -130,12 +137,62 @@ void ModApp::OnLoad() {
     logger->Info("mod dir: %s", m_modDir.c_str());
 
     LoadConfig();
-    LoadCatalogue();
-    LoadMissions();
 
     m_delta = WorldDelta::Load(m_deltaPath);
     if (m_config.startingMoney > 0 && m_delta.money == 0)
         m_delta.money = m_config.startingMoney;
+
+    LoadMissions();
+    m_overlay.SetMissions(&m_missions, &m_delta);
+
+    m_adapter.SetTickCallback([this](double dt) { OnTick(dt); });
+    m_adapter.SetTouchCallback([this](int a, int t, int x, int y) { OnTouch(a, t, x, y); });
+    m_adapter.SetShutdownCallback([this]() { OnUnload(); });
+
+    EnsureLoaderStage();
+    logger->Info("USA 1:1 loader stage done, waiting for the first game tick");
+}
+
+// Stage 1b. AML fires this when every mod finished loading. Retry the hook in
+// case another mod was still initialising during OnModLoad.
+void ModApp::OnAllModsLoaded() {
+    logger->Info("USA 1:1: all mods loaded, finalising loader stage");
+    if (!EnsureLoaderStage())
+        logger->Print(LogP_Warn, "USA 1:1: engine hooks unavailable, mod stays inert (%s)",
+                      m_adapter.LastError().c_str());
+}
+
+bool ModApp::EnsureLoaderStage() {
+    if (m_loaderStage)
+        return true;
+    if (!m_adapter.Initialize()) {
+        logger->Print(LogP_Warn, "adapter loader stage failed: %s", m_adapter.LastError().c_str());
+        return false;
+    }
+    m_loaderStage = true;
+    return true;
+}
+
+// Stage 2. Runs from the first CGame::Process tick: the engine is up, the model
+// info array is filled, streaming and pools are live. Everything heavy (symbol
+// verification, CModelInfo scan, ImGui, JNI/CloudSync) happens here.
+void ModApp::BootRuntime() {
+    if (m_runtimeReady)
+        return;
+    ++m_bootAttempts;
+
+    if (!EnsureLoaderStage())
+        return;
+
+    if (!m_adapter.InitializeRuntime()) {
+        if (m_bootAttempts <= 3)
+            logger->Print(LogP_Warn, "runtime stage not ready yet (%s), retrying", m_adapter.LastError().c_str());
+        return;
+    }
+
+    logger->Info("USA 1:1: %s", m_adapter.SymbolSummary().c_str());
+
+    LoadCatalogue();
 
     FloatingOrigin::Config originCfg;
     originCfg.chunkSize = m_config.chunkSize;
@@ -161,13 +218,17 @@ void ModApp::OnLoad() {
     m_polygon = std::make_unique<TestPolygon>(m_adapter, m_catalog);
     m_streamingEnabled = m_config.streamingEnabled;
 
-    m_overlay.SetMissions(&m_missions, &m_delta);
     if (!m_overlay.Initialize())
         logger->Print(LogP_Warn, "ImGui overlay failed to init - the mod still runs headless");
     m_overlay.SetVisible(m_config.showOverlayOnStart);
+    m_overlay.SetMissions(&m_missions, &m_delta);
     WireOverlayActions();
 
+    // CloudSync needs a JNI environment; the transport reports whether it got
+    // one and stays inert otherwise.
     m_cloud = std::make_unique<net::CloudSync>(m_transport, m_missionsDir, m_modDir + "/cloud_state.json");
+    if (!m_transport.Available())
+        logger->Print(LogP_Warn, "CloudSync disabled: %s", m_transport.LastError().c_str());
     m_cloud->SetManifestUrl(m_config.manifestUrl);
     m_cloud->SetMissionsBaseUrl(m_config.missionsBaseUrl);
     m_cloud->SetUpdatedCallback([this](const std::vector<std::string> &ids) {
@@ -180,16 +241,23 @@ void ModApp::OnLoad() {
             m_adapter.ShowToast(m_cloudLabel);
     });
 
-    m_adapter.SetTickCallback([this](double dt) { OnTick(dt); });
-    m_adapter.SetTouchCallback([this](int a, int t, int x, int y) { OnTouch(a, t, x, y); });
-    m_adapter.SetShutdownCallback([this]() { OnUnload(); });
-
     m_sessionStart = m_adapter.NowSeconds();
     m_ready = true;
-    logger->Info("USA 1:1 loaded: %zu models, %zu missions, grid %dx%d",
-                 m_catalog.Size(), m_missions.Size(), m_config.gridRadius * 2 + 1, m_config.gridRadius * 2 + 1);
+    m_runtimeReady = true;
+    logger->Info("USA 1:1 loaded: %zu models, %zu missions, grid %dx%d", m_catalog.Size(), m_missions.Size(),
+                 m_config.gridRadius * 2 + 1, m_config.gridRadius * 2 + 1);
     if (m_config.autoStartPolygon)
         TogglePolygon();
+}
+
+void ModApp::OnGameCrash(const char *library, int sig, int code, uintptr_t libaddr) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "CRASH lib=%s sig=%d code=%d libaddr=0x%llX", library ? library : "?",
+             sig, code, static_cast<unsigned long long>(libaddr));
+    logger->Error("%s", buf);
+    logger->Error("state: loader=%d runtime=%d ready=%d models=%zu missions=%zu shifts=%zu", m_loaderStage ? 1 : 0,
+                  m_runtimeReady ? 1 : 0, m_ready ? 1 : 0, m_catalog.Size(), m_missions.Size(),
+                  m_origin.TotalShifts());
 }
 
 void ModApp::OnUnload() {
@@ -205,6 +273,8 @@ void ModApp::OnUnload() {
     m_overlay.Shutdown();
     m_adapter.Shutdown();
     m_ready = false;
+    m_runtimeReady = false;
+    m_loaderStage = false;
     logger->Info("USA 1:1 unloaded");
 }
 
@@ -306,8 +376,16 @@ void ModApp::ApplyInitialSpawn() {
 }
 
 void ModApp::OnTick(double dt) {
-    if (!m_ready)
-        return;
+    if (!m_runtimeReady) {
+        // Wait until the world is actually live (player ped exists, streaming
+        // is initialised): the model info array is still filling up during the
+        // loading screen, and a catalogue scanned then would be empty.
+        if (!m_adapter.IsEngineLoaded())
+            return;
+        BootRuntime();
+        if (!m_runtimeReady)
+            return;
+    }
     if (!m_adapter.IsGameReady())
         return;
     if (!m_initialSpawnDone)
@@ -550,4 +628,12 @@ void ModApp::StartMission(const std::string &id) {
 
 ON_MOD_LOAD() { ModApp::Get().OnLoad(); }
 
+ON_ALL_MODS_LOAD() { ModApp::Get().OnAllModsLoaded(); }
+
 ON_MOD_UNLOAD() { ModApp::Get().OnUnload(); }
+
+// Forwards the loader's crash report: the log then names the library and the
+// offsets instead of leaving a bare tombstone in aml_crashlog.txt.
+ON_GAME_CRASH() {
+    ModApp::Get().OnGameCrash(library, sig, code, libaddr);
+}

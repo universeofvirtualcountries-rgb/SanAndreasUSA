@@ -17,10 +17,17 @@ class AndroidHttpTransport final : public IHttpTransport {
     bool Download(const std::string &url, const std::string &localPath, int timeoutSec) override;
 
     const std::string &LastError() const { return m_lastError; }
+    // True only when a usable JNIEnv/JavaVM was obtained from the loader. The
+    // check validates the interface pointers: on loaders that predate the
+    // GetJavaVM slot, aml->GetJavaVM() returns garbage, and calling through it
+    // is an instant crash.
+    bool Available() const;
 
   private:
     bool Fetch(const std::string &url, int timeoutSec, std::string *outBuf, FILE *outFile);
-    std::string m_lastError;
+    mutable std::string m_lastError;
+    mutable bool m_availableChecked = false;
+    mutable bool m_available = false;
 };
 
 } // namespace net

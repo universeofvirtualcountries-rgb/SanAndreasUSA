@@ -79,6 +79,16 @@ full mission re-sync.
 
 ## 7. Troubleshooting
 
+* **Crash right after "USA 1:1 Procedural Expansion loading (loader stage)..."**
+  — the log line order tells the stage: `mod dir:` (paths), `config loaded`,
+  `Adapter: libGTASA.so base = 0x...` (loader), `Adapter: hooks installed`
+  (hooks), `Adapter: N/12 engine symbols` (engine exports), `USA 1:1 loaded`
+  (runtime). Whichever line is missing is the stage that failed; every failure
+  path now logs the raw pointer it rejected instead of crashing.
+* **Loader older than the API the mod is built against** — the mod targets AML
+  builds that provide `GetLibHandle`/`GetSym`; on older loaders the log says
+  `loader does not provide a libGTASA.so handle` and the mod stays inert instead
+  of taking the game down.
 * **No overlay** — check the AML log (`logcat | grep USA1to1`) for
   `Overlay: ImGui RenderWare backend failed to initialise`; the mod keeps running
   headless and streaming still works.

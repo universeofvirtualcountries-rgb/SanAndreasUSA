@@ -54,6 +54,12 @@ if(ANDROID)
 
     target_compile_options(USA1to1 PRIVATE
         -O2
+        # Crash reports from aml_crashlog.txt name offsets inside this .so; without
+        # line tables and unwind info those offsets are unreadable. -g1 is enough
+        # for llvm-addr2line and keeps the artifact small.
+        -g1
+        -funwind-tables
+        -fno-omit-frame-pointer
         -fvisibility=hidden
         -fvisibility-inlines-hidden
         -fexceptions
@@ -72,7 +78,9 @@ if(ANDROID)
     target_link_libraries(USA1to1 PRIVATE log android)
     # Keep libc++ and our own symbols private: other AML mods may be built with
     # a different NDK and must not interpose us.
-    target_link_options(USA1to1 PRIVATE -Wl,--exclude-libs,ALL)
+    target_link_options(USA1to1 PRIVATE
+        -Wl,--exclude-libs,ALL
+        -Wl,-Map=${CMAKE_BINARY_DIR}/USA1to1.map)
 
     set_target_properties(USA1to1 PROPERTIES OUTPUT_NAME "USA1to1")
 else()
