@@ -63,7 +63,7 @@ class GTASAAdapter final : public core::IEngineBridge {
 
     // Scans CModelInfo and fills `out` with real ids, names and collision bounds.
     // Returns the number of models added.
-    int BuildLiveCatalog(core::ModelCatalog &out);
+    int BuildLiveCatalog(core::ModelCatalog &out, const std::string &assetDir);
 
     // Diagnostics for the report / log.
     const std::string &GameVersionLabel() const { return m_versionLabel; }
@@ -73,6 +73,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     bool IsGameReady() override;
     bool GetPlayerPosition(core::Vec3f &out) override;
     void SetPlayerPosition(const core::Vec3f &pos) override;
+    void RecoverPlayerPosition(const core::Vec3f &pos) override;
     bool IsPlayerInVehicle() override;
     float GetFps() override;
 
@@ -169,7 +170,8 @@ class GTASAAdapter final : public core::IEngineBridge {
     float m_fps = 0.0f;
 
     int m_modelIdLimit = 20000;
-    int m_roadModel = -2; // -2 = not probed yet, -1 = nothing found
+    void *m_modelByName = nullptr;
+    int m_roadModel = -1;
     int m_interiorArea = 0;
     uint64_t m_nextMarkerEngineId = 0x55000000ULL;
 

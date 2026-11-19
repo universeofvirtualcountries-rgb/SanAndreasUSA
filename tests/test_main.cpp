@@ -12,6 +12,7 @@
 #include "core/json.hpp"
 #include "core/log.hpp"
 #include "core/safe.hpp"
+#include "core/screen_to_render.hpp"
 #include "core/status_feed.hpp"
 #include "core/mission.hpp"
 #include "core/model_catalog.hpp"
@@ -20,6 +21,7 @@
 #include "core/touch_gesture.hpp"
 #include "core/world_delta.hpp"
 #include "net/cloud_sync.hpp"
+#include "plugin-sdk/renderware/imgui/imgui_shared.h"
 
 #include <cmath>
 #include <cstdio>
@@ -915,6 +917,184 @@ TEST(swipe_is_scaled_for_small_screens) {
 // Test polygon
 // ---------------------------------------------------------------------------
 
+TEST(screen_to_render_scales_both_axes_and_keeps_outside_coordinates) {
+    constexpr auto p = ScreenToRender(1200.0f, 100.0f, 2400, 1080, 1600, 540);
+    static_assert(p.validDimensions);
+    CHECK_NEAR(p.x, 800.0f, 0.001);
+    CHECK_NEAR(p.y, 50.0f, 0.001);
+    CHECK_NEAR(p.scaleX, 2.0f / 3.0f, 0.001);
+    CHECK_NEAR(p.scaleY, 0.5f, 0.001);
+    constexpr auto outside = ScreenToRender(-10.0f, 1200.0f, 2400, 1080, 1200, 540);
+    CHECK(outside.x == -5.0f && outside.y == 600.0f);
+    constexpr auto identity = ScreenToRender(10.0f, 30.0f, 1200, 540, 1200, 540);
+    CHECK(identity.validDimensions && identity.x == 10.0f && identity.y == 30.0f);
+}
+
+TEST(screen_to_render_falls_back_when_any_dimension_is_missing) {
+    for (const auto &p : {ScreenToRender(42.0f, 12.0f, 0, 100, 48, 50),
+                          ScreenToRender(42.0f, 12.0f, 20, -1, 48, 50),
+                          ScreenToRender(42.0f, 12.0f, 20, 100, 0, 50),
+                          ScreenToRender(42.0f, 12.0f, 20, 100, 48, 0)}) {
+        CHECK(!p.validDimensions);
+        CHECK(p.x == 42.0f && p.y == 12.0f);
+        CHECK(p.scaleX == 1.0f && p.scaleY == 1.0f);
+    }
+}
+
+TEST(imgui_routes_screen_pixel_tap_to_render_pixel_pill) {
+    ImGuiShared::Coordinator coordinator;
+    std::vector<ImGuiShared::Touch> events;
+    const auto client = coordinator.Add({&events, [](void *ctx, const ImGuiShared::Touch *touches, uint32_t count,
+                                                    int32_t, int32_t, float) {
+        if (count)
+            static_cast<std::vector<ImGuiShared::Touch> *>(ctx)->assign(touches, touches + count);
+    }, [](void *) {}});
+    const ImGuiShared::Rect pill{541.0f, 12.0f, 659.0f, 48.0f};
+    coordinator.SetRects(client, &pill, 1);
+    coordinator.Frame(1200, 540, 1.0f / 60.0f);
+    CHECK(!coordinator.ProcessTouch(2, 0, 15, 15, 2400, 1080));
+    CHECK(coordinator.ProcessTouch(2, 0, 1200, 48, 2400, 1080));
+    CHECK(coordinator.ProcessTouch(1, 0, 1400, 48, 2400, 1080)); // release outside is still captured
+    coordinator.Frame(1200, 540, 1.0f / 60.0f);
+    CHECK(events.size() == 2);
+    if (events.size() == 2) {
+        CHECK(events[0].type == 2 && events[0].x == 600.0f && events[0].y == 24.0f);
+        CHECK(events[1].type == 1 && events[1].x == 700.0f);
+    }
+    const auto sample = coordinator.LastTouch();
+    CHECK(sample.rawX == 1400.0f && sample.x == 700.0f && sample.scaleX == 0.5f);
+    CHECK(sample.screenW == 2400 && sample.screenH == 1080 && sample.renderW == 1200 && sample.renderH == 540);
+}
+
+TEST(road_selection_uses_table_whitelist_tags_then_largest_flat_collision) {
+    auto candidate = [](int id, PropTag tag, Vec3f half, bool collidable = true) {
+        ModelProto p;
+        p.id = id;
+        p.tag = tag;
+        p.colHalfExtents = half;
+        p.hasCollision = collidable;
+        return p;
+    };
+    ModelCatalog cat;
+    cat.AddModels({candidate(10, PropTag::RoadFlat, {8, 12, 0.25f}),
+                   candidate(20, PropTag::Prop, {6, 10, 0.2f}),
+                   candidate(30, PropTag::Prop, {10, 10, 0.5f}),
+                   candidate(40, PropTag::Prop, {40, 40, 12}),
+                   candidate(50, PropTag::RoadFlat, {20, 20, 0.0f}, false)});
+    auto pick = [](const ModelProto *p) { return p ? p->id : -1; };
+    CHECK(pick(cat.PickRoad(20, 30)) == 20);
+    CHECK(pick(cat.PickRoad(40, 30)) == 30);
+    CHECK(pick(cat.PickRoad(40, 50)) == 10);
+    cat.Add(candidate(10, PropTag::Prop, {8, 12, 0.25f}));
+    CHECK(pick(cat.PickRoad()) == 30);
+    cat.Clear();
+    CHECK(!cat.PickRoad());
+}
+
+TEST(shipped_model_whitelist_has_named_road_and_non_road_entries) {
+    const auto root = Json::Parse(ReadFile(SrcPath("assets/model_whitelist.json")));
+    CHECK(root.GetInt("version", 0) == 1);
+    const auto &models = root["models"].GetArray();
+    bool road = false, other = false;
+    std::set<std::string> names;
+    for (const auto &model : models) {
+        const auto name = model.GetString("name", "");
+        CHECK(!name.empty() && name.size() <= 20 && names.insert(name).second);
+        const auto tag = PropTagFromName(model.GetString("tag", ""));
+        CHECK(tag != PropTag::Unknown);
+        road |= tag == PropTag::RoadFlat;
+        other |= tag != PropTag::RoadFlat;
+    }
+    CHECK(road && other);
+}
+
+TEST(polygon_sets_height_and_recovers_after_origin_shift_or_fall) {
+    test::MockBridge bridge;
+    bridge.roadModel = -1;
+    auto cat = MakeTestCatalog();
+    TestPolygon::Config cfg;
+    cfg.generationZ = 400.0f;
+    TestPolygon polygon(bridge, cat, cfg);
+    bridge.player = {10.0f, 20.0f, 40.0f};
+    CHECK(polygon.Enable({1010.0, 2020.0}, {1000.0, 2000.0}));
+    CHECK(polygon.RoadModel() == 3001);
+    CHECK(bridge.player.x == 10.0f && bridge.player.y == 20.0f && bridge.player.z == 402.0f);
+    CHECK(polygon.HasVisuals());
+    for (const auto &kv : bridge.objects) {
+        CHECK(kv.second.collision);
+        CHECK_NEAR(kv.second.pos.z + 0.3f, 400.0f, 0.001);
+    }
+    for (const auto &kv : bridge.markers)
+        CHECK_NEAR(kv.second.pos.z, 400.3f, 0.001);
+    bridge.player = {-190.0f, 20.0f, 400.9f};
+    polygon.OnOriginShift({1200.0, 2000.0});
+    CHECK(bridge.player.x == -190.0f && bridge.player.z == 402.0f);
+    bridge.player = {-180.0f, 20.0f, 395.0f};
+    polygon.Update({1020.0, 2020.0}, {1200.0, 2000.0});
+    CHECK(bridge.player.z == 395.0f);
+    bridge.player.z = 394.9f;
+    polygon.Update({1020.0, 2020.0}, {1200.0, 2000.0});
+    CHECK(bridge.player.x == -190.0f && bridge.player.y == 20.0f && bridge.player.z == 402.0f);
+}
+
+TEST(polygon_reports_markers_only_if_road_request_fails) {
+    class RejectedBridge : public test::MockBridge {
+        bool RequestModel(int, bool) override { return false; }
+    } bridge;
+    TestPolygon polygon(bridge, MakeTestCatalog());
+    CHECK(polygon.Enable({}, {}));
+    CHECK(polygon.RoadModel() == 5000);
+    CHECK(!polygon.HasVisuals() && polygon.MarkerCount() > 0);
+    CHECK(bridge.player.z == 302.0f);
+    polygon.Disable();
+    CHECK(bridge.releases == 0 && bridge.flushes == 0);
+}
+
+TEST(generation_z_offsets_chunk_objects_and_door_markers_without_changing_relief) {
+    test::MockBridge low, high;
+    const auto cat = MakeTestCatalog();
+    ChunkGenerator lowGen(cat), highGen(cat, 450.0f);
+    CHECK_NEAR(HeightField::GenerationHeightAt(100, 100) - HeightField::HeightAt(100, 100), 300.0f, 0.001);
+    ChunkStreamer::Config cfg;
+    cfg.radius = 0;
+    cfg.maxSpawnsPerUpdate = 1000;
+    ChunkStreamer a(low, lowGen, cfg), b(high, highGen, cfg);
+    a.Update({100, 100}, {});
+    b.Update({100, 100}, {});
+    CHECK(!low.objects.empty() && low.objects.size() == high.objects.size());
+    CHECK(!low.markers.empty() && low.markers.size() == high.markers.size());
+    for (const auto &[handle, obj] : low.objects) {
+        CHECK(obj.collision);
+        CHECK_NEAR(high.objects.at(handle).pos.z - obj.pos.z, 150.0f, 0.001);
+    }
+    for (const auto &[id, marker] : low.markers)
+        CHECK_NEAR(high.markers.at(id).pos.z - marker.pos.z, 150.0f, 0.001);
+}
+
+TEST(streamer_drops_rejected_or_timed_out_models_and_releases_only_accepted_requests) {
+    class UnavailableBridge : public test::MockBridge {
+      public:
+        bool accept = false;
+        bool RequestModel(int, bool) override { ++requests; return accept; }
+    } bridge;
+    ChunkGenerator gen(MakeTestCatalog());
+    ChunkStreamer::Config cfg;
+    cfg.radius = 0;
+    ChunkStreamer streamer(bridge, gen, cfg);
+    streamer.Update({100, 100}, {});
+    CHECK(bridge.requests > 0 && streamer.PendingCount() == 0 && streamer.ObjectCount() == 0);
+    streamer.Shutdown();
+    CHECK(bridge.releases == 0);
+    bridge.accept = true;
+    streamer.Update({100, 100}, {});
+    CHECK(streamer.PendingCount() > 0);
+    bridge.now = 11.0;
+    streamer.Update({100, 100}, {});
+    CHECK(streamer.PendingCount() == 0 && streamer.ObjectCount() == 0);
+    streamer.Shutdown();
+    CHECK(bridge.releases > 0);
+}
+
 TEST(polygon_spawns_endless_road_with_200m_markers) {
     test::MockBridge bridge;
     const ModelCatalog cat = MakeTestCatalog();
@@ -961,6 +1141,7 @@ TEST(config_roundtrip_and_clamps) {
     cfg.gridRadius = 2;
     cfg.spawnCity = "Las Vegas";
     cfg.cloudSyncEnabled = false;
+    cfg.generationZ = 433.5f;
     cfg.localLimit = 1000.0;
 
     const fs::path path = fs::temp_directory_path() / "usa1to1_config_test.json";
@@ -969,6 +1150,7 @@ TEST(config_roundtrip_and_clamps) {
     ModConfig loaded;
     CHECK(loaded.LoadFile(path.string(), &err));
     CHECK(loaded.gridRadius == 2);
+    CHECK(loaded.generationZ == 433.5f);
     CHECK(loaded.spawnCity == "Las Vegas");
     CHECK(!loaded.cloudSyncEnabled);
     CHECK(!loaded.manifestUrl.empty());
@@ -983,18 +1165,21 @@ TEST(config_roundtrip_and_clamps) {
     CHECK_NEAR(wild.localLimit, 1000.0, 1e-9);
 
     // The model scan limit decides how far into CModelInfo we may look.
-    Json small = Json::Parse(R"({"content":{"model_id_limit":10}})");
+    Json small = Json::Parse(R"({"content":{"model_id_limit":10,"generation_z":-7}})");
     ModConfig clampedLow;
     CHECK(clampedLow.FromJson(small));
     CHECK(clampedLow.modelIdLimit == 400);
-    Json huge = Json::Parse(R"({"content":{"model_id_limit":900000}})");
+    CHECK(clampedLow.generationZ == 50.0f);
+    Json huge = Json::Parse(R"({"content":{"model_id_limit":900000,"generation_z":7777}})");
     ModConfig clampedHigh;
     CHECK(clampedHigh.FromJson(huge));
     CHECK(clampedHigh.modelIdLimit == 26316);
+    CHECK(clampedHigh.generationZ == 900.0f);
     Json ok = Json::Parse(R"({"content":{"model_id_limit":24000}})");
     ModConfig kept;
     CHECK(kept.FromJson(ok));
     CHECK(kept.modelIdLimit == 24000);
+    CHECK(kept.generationZ == 300.0f);
 }
 
 TEST(config_missing_file_is_default) {

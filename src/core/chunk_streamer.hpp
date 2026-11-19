@@ -32,7 +32,9 @@ struct ActiveChunk {
     std::vector<StreamedObject> objects;
     std::vector<ChunkProp> pending; // props waiting for their model to load
     std::vector<uint64_t> markerIds;
-    std::vector<int> models;
+    enum class ModelState { Pending, Loaded, Failed };
+    std::unordered_map<int, ModelState> models; // accepted requests only
+    double requestedAt = 0.0;
 };
 
 struct DoorMarkerInfo {
@@ -83,11 +85,6 @@ class ChunkStreamer {
     const Config &GetConfig() const { return m_config; }
 
   private:
-    struct PendingChunk {
-        ChunkContent content;
-        Vec2d origin;
-    };
-
     void UnloadChunk(std::pair<int64_t, int64_t> key);
     void BuildChunk(const ChunkContent &content, const Vec2d &origin);
     bool SpawnPendingProps(ActiveChunk &chunk, const Vec2d &origin, int &budget);
@@ -97,6 +94,9 @@ class ChunkStreamer {
     Config m_config;
     std::map<std::pair<int64_t, int64_t>, ActiveChunk> m_active;
     std::unordered_map<uint64_t, DoorMarkerInfo> m_doorMarkers;
+    size_t m_requested = 0, m_loaded = 0, m_failed = 0, m_spawnFailed = 0;
+    bool m_statsDirty = false;
+    double m_nextStatsLog = 0.0;
 };
 
 } // namespace core

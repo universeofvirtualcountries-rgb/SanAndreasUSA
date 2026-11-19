@@ -63,6 +63,8 @@ class IEngineBridge {
     // Position in RenderWare local space (metres, origin = floating origin).
     virtual bool GetPlayerPosition(Vec3f &out) = 0;
     virtual void SetPlayerPosition(const Vec3f &pos) = 0;
+    // Safety warp: implementations may clear downward speed and move a driven vehicle too.
+    virtual void RecoverPlayerPosition(const Vec3f &pos) { SetPlayerPosition(pos); }
     virtual bool IsPlayerInVehicle() = 0;
     virtual float GetFps() = 0;
 

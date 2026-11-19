@@ -1,11 +1,10 @@
 // Two-finger swipe-down detector for opening the ImGui overlay.
 //
 // The overlay itself must not be the only way to open the overlay, so the
-// gesture is fed from AND_TouchEvent (Events::touchScreenEvent) and stays
+// gesture is fed from AND_TouchEvent (after translating GTA action codes) and stays
 // independent from ImGui's own input handling.
 //
-// Action codes are Android MotionEvent constants, which is what the game
-// forwards: 0=DOWN, 1=UP, 2=MOVE, 3=CANCEL, 5=POINTER_DOWN, 6=POINTER_UP.
+// Feed action codes are Android MotionEvent constants: 0=DOWN, 1=UP, 2=MOVE, 3=CANCEL, 5=POINTER_DOWN, 6=POINTER_UP.
 // The detector never relies on them too hard: it also triggers purely from
 // coordinates, so a firmware that reports moves with action 0 still works.
 #pragma once
@@ -16,11 +15,8 @@
 namespace usa1to1 {
 namespace core {
 
-// Single-finger tap in the top-left corner ("[USA 1:1]" button).
-//
-// Fed from the same AND_TouchEvent hook as the swipe, so the overlay can be
-// opened even when the game (or a vendor touch layer) swallows input before
-// ImGui ever sees it. Coordinates are screen pixels, y grows downwards.
+// Single-finger tap detector for a top-left zone. Coordinates are screen
+// pixels, y grows downwards. The centered ImGui pill uses ImGui hit testing.
 class CornerTapDetector {
   public:
     struct Config {

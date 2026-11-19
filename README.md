@@ -90,8 +90,8 @@ Design notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Honest limitations
 
 * Procedural content needs a model catalogue. Without `assets/objects_db.json` the mod
-  scans `CModelInfo` at runtime (ids, names, collision spheres) and classifies by name;
-  running `tools/parse_ide.py` gives exact collision boxes and much better tags.
+  resolves the bundled model whitelist against live `CModelInfo` and validates
+  numeric fallback candidates; running `tools/parse_ide.py` improves the tags.
   If neither finds floor/wall models, interiors are furniture-only — no fake geometry
   is invented.
 * `parse_ide.py` does not guess COL4 bounds (they live in sub-sections and differ

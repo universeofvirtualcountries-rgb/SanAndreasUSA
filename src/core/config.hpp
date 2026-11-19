@@ -2,6 +2,7 @@
 // can also be edited on a PC and pushed back).
 #pragma once
 
+#include "heightfield.hpp"
 #include "json.hpp"
 
 #include <string>
@@ -25,6 +26,7 @@ struct ModConfig {
     bool interiorsEnabled = true;
     bool doorMarkersEnabled = true;
     bool autoStartPolygon = false;
+    float generationZ = HeightField::kDefaultGenerationZ;
     std::string spawnCity = "Los Angeles";
     bool teleportOnFirstLoad = true;
     float doorTriggerRadius = 1.6f;

@@ -25,7 +25,8 @@ bool NearCity(const Vec2d &p, const char *regionCode, double radiusMetres) {
 
 } // namespace
 
-ChunkGenerator::ChunkGenerator(const ModelCatalog &catalog) : m_catalog(catalog) {}
+ChunkGenerator::ChunkGenerator(const ModelCatalog &catalog, float generationZ)
+    : m_catalog(catalog), m_generationZ(HeightField::ClampGenerationZ(generationZ)) {}
 
 Vec2d ChunkGenerator::ChunkOriginGlobal(int64_t chunkX, int64_t chunkY) {
     return {static_cast<double>(chunkX) * kChunkSize, static_cast<double>(chunkY) * kChunkSize};
@@ -70,7 +71,7 @@ std::vector<float> ChunkGenerator::SampleEdge(int64_t chunkX, int64_t chunkY, in
             y += kChunkSize;
             break;
         }
-        out.push_back(HeightField::HeightAt(x, y));
+        out.push_back(HeightField::GenerationHeightAt(x, y, m_generationZ));
     }
     return out;
 }
@@ -150,7 +151,7 @@ ChunkContent ChunkGenerator::Generate(int64_t chunkX, int64_t chunkY) const {
 
                 ChunkProp p;
                 p.modelId = proto->id;
-                p.localPos = {lx, ly, HeightField::HeightAt(gxw, gyw)};
+                p.localPos = {lx, ly, HeightField::GenerationHeightAt(gxw, gyw, m_generationZ)};
                 p.headingRad = static_cast<float>(rng.RangeInt(0, 3)) * 1.5707963f;
                 p.tag = PropTag::Building;
                 p.halfFootprint = halfFp;
@@ -191,7 +192,7 @@ ChunkContent ChunkGenerator::Generate(int64_t chunkX, int64_t chunkY) const {
                 continue;
             ChunkProp p;
             p.modelId = light->id;
-            p.localPos = {lx, ly, HeightField::HeightAt(gxw, gyw)};
+            p.localPos = {lx, ly, HeightField::GenerationHeightAt(gxw, gyw, m_generationZ)};
             p.headingRad = 0.0f;
             p.tag = PropTag::StreetLight;
             p.halfFootprint = halfFp;
@@ -215,7 +216,7 @@ ChunkContent ChunkGenerator::Generate(int64_t chunkX, int64_t chunkY) const {
                 continue;
             ChunkProp p;
             p.modelId = tree->id;
-            p.localPos = {lx, ly, HeightField::HeightAt(gxw, gyw)};
+            p.localPos = {lx, ly, HeightField::GenerationHeightAt(gxw, gyw, m_generationZ)};
             p.headingRad = rng.RangeF(0.0f, 6.2831853f);
             p.tag = PropTag::Tree;
             p.halfFootprint = halfFp;
@@ -237,7 +238,7 @@ ChunkContent ChunkGenerator::Generate(int64_t chunkX, int64_t chunkY) const {
             const double gyw = out.originGlobal.y + ly;
             ChunkProp p;
             p.modelId = prop->id;
-            p.localPos = {lx, ly, HeightField::HeightAt(gxw, gyw)};
+            p.localPos = {lx, ly, HeightField::GenerationHeightAt(gxw, gyw, m_generationZ)};
             p.headingRad = rng.RangeF(0.0f, 6.2831853f);
             p.tag = PropTag::Prop;
             p.halfFootprint = halfFp;
@@ -252,7 +253,7 @@ ChunkContent ChunkGenerator::Generate(int64_t chunkX, int64_t chunkY) const {
         for (int j = 0; j <= 4; ++j) {
             const double hx = out.originGlobal.x + kChunkSize * (i / 4.0);
             const double hy = out.originGlobal.y + kChunkSize * (j / 4.0);
-            const float h = HeightField::HeightAt(hx, hy);
+            const float h = HeightField::GenerationHeightAt(hx, hy, m_generationZ);
             out.heightMin = std::min(out.heightMin, h);
             out.heightMax = std::max(out.heightMax, h);
         }

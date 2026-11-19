@@ -10,14 +10,14 @@
 #include <filesystem>
 #include <vector>
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(USA1TO1_ARM_COMPILE_CHECK)
 #include <jni.h>
 #endif
 
 namespace usa1to1 {
 namespace net {
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(USA1TO1_ARM_COMPILE_CHECK)
 
 namespace {
 

@@ -20,6 +20,10 @@ class HeightField {
     static constexpr double kLatticeSpacing = 400.0; // must be a multiple of chunk size
     static constexpr uint64_t kWorldSalt = 0x55A1'1EE1'2026'0001ULL;
 
+    static constexpr float kDefaultGenerationZ = 300.0f;
+    static float ClampGenerationZ(float z);
+    static float GenerationHeightAt(double globalX, double globalY, float baseZ = kDefaultGenerationZ);
+
     // Height in metres at a global plane position. Continuous everywhere, C0 on
     // lattice edges (which is what chunk seams need).
     static float HeightAt(double globalX, double globalY);

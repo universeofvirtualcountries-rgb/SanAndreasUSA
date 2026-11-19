@@ -93,7 +93,10 @@ else()
     )
     target_compile_options(usa1to1_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
-    add_executable(usa1to1_tests tests/test_main.cpp)
+    add_executable(usa1to1_tests
+        tests/test_main.cpp
+        plugin-sdk/renderware/imgui/imgui_shared.cpp
+    )
     target_link_libraries(usa1to1_tests PRIVATE usa1to1_core)
     target_include_directories(usa1to1_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/tests
@@ -101,6 +104,17 @@ else()
     )
     target_compile_options(usa1to1_tests PRIVATE -Wall -Wextra)
     target_compile_definitions(usa1to1_tests PRIVATE USA1TO1_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+    # Existing CI builds this target before running the tests. Keep the guard
+    # active there even if the workflow file cannot be updated by the GitHub App.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_custom_target(usa1to1_source_lists
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_source_lists.py
+            VERBATIM
+        )
+        add_dependencies(usa1to1_tests usa1to1_source_lists)
+    endif()
 
     enable_testing()
     add_test(NAME USA1to1.unit COMMAND usa1to1_tests)

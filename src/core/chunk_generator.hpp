@@ -5,6 +5,7 @@
 // build the exact same street, from the same models, at the same heights.
 #pragma once
 
+#include "heightfield.hpp"
 #include "model_catalog.hpp"
 #include "types.hpp"
 
@@ -55,7 +56,7 @@ class ChunkGenerator {
   public:
     static constexpr double kChunkSize = 200.0;
 
-    explicit ChunkGenerator(const ModelCatalog &catalog);
+    explicit ChunkGenerator(const ModelCatalog &catalog, float generationZ = HeightField::kDefaultGenerationZ);
 
     ChunkContent Generate(int64_t chunkX, int64_t chunkY) const;
 
@@ -72,6 +73,7 @@ class ChunkGenerator {
 
   private:
     ModelCatalog m_catalog;
+    float m_generationZ;
 };
 
 } // namespace core

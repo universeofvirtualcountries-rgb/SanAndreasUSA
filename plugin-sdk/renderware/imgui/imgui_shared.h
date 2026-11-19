@@ -17,6 +17,11 @@ struct Touch {
     int32_t type, finger;
     float x, y;
 };
+struct TouchSample {
+    float rawX, rawY, x, y, scaleX, scaleY;
+    int32_t screenW, screenH, renderW, renderH;
+    uint64_t sequence;
+};
 struct Client {
     void *user;
     void (*frame)(void *, const Touch *, uint32_t, int32_t, int32_t, float);
@@ -30,6 +35,8 @@ struct API {
     Handle (*add)(void *, const Client *);
     void (*remove)(void *, Handle);
     void (*setRects)(void *, Handle, const Rect *, uint32_t);
+    // Optional v1 extension: detect via bytes before reading the pointer.
+    void (*lastTouch)(void *, TouchSample *);
 };
 
 // Cross-plugin draw order and touch routing. Add/Remove/SetRects/Frame/Reset run on the game's main thread;
@@ -40,6 +47,7 @@ class Coordinator {
     void Remove(Handle id);
     void SetRects(Handle id, const Rect *rects, uint32_t count);
     bool ProcessTouch(int type, int finger, float x, float y, int windowWidth, int windowHeight);
+    TouchSample LastTouch();
     void Frame(int width, int height, float deltaTime);
     void Reset();
 
@@ -57,5 +65,6 @@ class Coordinator {
     std::array<bool, 32> captured{};
     Handle nextId = 1;
     int width = 0, height = 0;
+    TouchSample lastTouch{};
 };
 } // namespace ImGuiShared

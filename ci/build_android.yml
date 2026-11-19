@@ -29,7 +29,7 @@ jobs:
         run: cmake --build build-host -j"$(nproc)"
 
       - name: Run unit tests
-        run: ./build-host/usa1to1_tests
+        run: ctest --test-dir build-host --output-on-failure
 
       - name: Validate tooling (parse_ide self-test)
         run: |
@@ -41,9 +41,16 @@ jobs:
       - name: Validate build source lists
         run: python3 tools/check_source_lists.py --verbose
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Cross-compile source checks (ARMv7 and ARM64)
+        run: bash tools/arm_compile_check.sh
+
       - name: Validate JSON assets
         run: |
-          for f in assets/manifest.json assets/objects_db.sample.json assets/missions/*.json; do
+          for f in assets/*.json assets/missions/*.json; do
             python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
             echo "ok $f"
           done

@@ -43,9 +43,8 @@ boundary:
   now a skip plus a log line.
 
 The scan never goes past `content.model_id_limit` (default **20000**, ceiling
-26316 for Fastman92-remapped ids). `Adapter: live catalogue built, N models,
-K slots rejected (limit L, first bad index I)` says exactly how far the table is
-trustworthy on that installation.
+26316 for Fastman92-remapped ids). If no models pass validation, the log gives
+rejection counts by reason and dumps the first eight raw slots in hex.
 
 ## 1. Symbol resolution
 
@@ -108,10 +107,10 @@ always calls the original afterwards so the game keeps running normally.
 ## 4. Streaming and object lifecycle
 
 * `CStreaming::RequestModel(id, 0)` to request, `CStreaming::ms_aInfoForModel[id].m_status == 1`
-  to test readiness (bounds-checked against the mobile limit of 26316 ids),
+  to test readiness (bounds-checked against `content.model_id_limit`),
   `CStreaming::SetModelIsDeletable(id)` to release.
-* Spawn: `CObject::Create(modelId, true)` → `bUsesCollision = 1` → `CWorld::Add(obj)` →
-  `Teleport(pos)` → `CMatrix::SetRotateZOnly(heading)` → `UpdateRwFrame()`.
+* Spawn: `CObject::Create(modelId, true)` → static/collision flags → final
+  rotation and position → `UpdateRwFrame()` → `CWorld::Add(obj)`.
 * Despawn: `CWorld::Remove(obj)` → native destructor via the plugin-sdk shim →
   `CPools::ms_pObjectPool->Delete(obj)` → `SetModelIsDeletable(modelId)`.
   The slot is validated with `CPools::ms_pObjectPool->IsObjectValid()` first, so a
@@ -140,11 +139,18 @@ skips interior Z, the main world offset is untouched while the player is inside.
 
 ## 7. Model catalogue
 
-`BuildLiveCatalog()` walks `CModelInfo::ms_modelInfoPtrs[400..model_id_limit]`, skips LODs,
-vehicles and zero-draw-distance entries, reads `m_szModelName`, `m_fDrawDistance`,
-`bIsRoad` and the collision bound sphere (`m_pColModel->m_boundSphere`) and classifies
-models into the generator's tags. `tools/parse_ide.py` produces the same schema with
-exact box bounds when the user runs it on extracted game files.
+`BuildLiveCatalog()` resolves `objects_db.json` and `model_whitelist.json` by
+name via `CModelInfo::GetModelInfo(const char *, int *)`. JSON IDs are not used
+to spawn objects. The numeric fallback is limited to 3000–18000 and the
+configured table limit. Both paths require a matching static-model type, a
+bounded model name, a valid draw distance and a collision box. The road is
+selected from the native road-flagged table entries, then the whitelist, the
+`RoadFlat` bucket, and finally the largest suitable flat collision footprint.
+
+The polygon uses a flat `content.generation_z`; chunk props and markers use
+that base plus deterministic terrain relief. The polygon moves the player to
+`generation_z + 2` on entry and after an origin shift, and recovers a fall
+below `generation_z - 5` while active.
 
 ## 8. Version differences handled
 
@@ -187,7 +193,8 @@ private; `llvm-nm -C` in the artifact dump is `-C`'d, so the names are readable.
 ```
 Adapter: libGTASA.so @ 0x..., version 2.10+ arm64-v8a
 Adapter: hooked CGame::Process at 0x...
-Adapter: road model from bIsRoad flag = ...
+Adapter: catalogue=N db=... whitelist=... numeric=... limit=... road=...
+ChunkStreamer: requested=... loaded=... failed=... spawn_failed=...
 USA 1:1 loaded: N models, 2 missions, grid 5x5
 FloatingOrigin: shift (-400.0, 0.0) entities=...
 ```

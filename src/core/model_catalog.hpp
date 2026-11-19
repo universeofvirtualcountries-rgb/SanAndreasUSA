@@ -44,6 +44,9 @@ struct ModelProto {
     bool isDynamic = false; // vehicles / peds, never used for static chunks
 };
 
+// A road must support a player, not just have a large bounding sphere.
+bool IsFlatRoadCandidate(const ModelProto &proto);
+
 class ModelCatalog {
   public:
     ModelCatalog() = default;
@@ -63,6 +66,8 @@ class ModelCatalog {
     Json ToJson() const;
 
     void Add(const ModelProto &proto);
+    void AddModels(std::vector<ModelProto> protos);
+    const std::vector<ModelProto> &All() const { return m_protos; }
     void Clear();
     size_t Size() const { return m_protos.size(); }
 
@@ -72,7 +77,7 @@ class ModelCatalog {
     const std::vector<const ModelProto *> &ByTag(PropTag tag) const;
     // Buckets that contain at least one usable (collidable) model.
     const std::vector<const ModelProto *> &Buildings() const { return ByTag(PropTag::Building); }
-    const ModelProto *PickRoad() const;
+    const ModelProto *PickRoad(int tableRoad = -1, int whitelistRoad = -1) const;
 
     bool HasTag(PropTag tag) const { return !ByTag(tag).empty(); }
 

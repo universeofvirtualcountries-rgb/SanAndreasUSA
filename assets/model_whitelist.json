@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "models": [
+    {"name": "road_LAW01", "tag": "road_flat"},
+    {"name": "road02_LAw2", "tag": "road_flat"},
+    {"name": "road01_LAx", "tag": "road_flat"},
+    {"name": "road01sfn", "tag": "road_flat"},
+    {"name": "road01sfe", "tag": "road_flat"},
+    {"name": "idlewood01_LAe", "tag": "building"},
+    {"name": "veg_palm02", "tag": "tree"},
+    {"name": "lamppost1", "tag": "light"},
+    {"name": "CJ_DUMPSTER2", "tag": "prop"}
+  ]
+}
