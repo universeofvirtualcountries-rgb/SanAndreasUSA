@@ -141,16 +141,11 @@ void ModApp::OnLoad() {
     m_missionsDir = m_modDir + "/assets/missions";
     logger->Info("mod dir: %s", m_modDir.c_str());
 
-    int screenW = 0, screenH = 0;
-    if (aml)
-        aml->GetDisplaySize(&screenW, &screenH);
-    ImGui_ImplRenderWare_SetScreenSize(screenW, screenH);
-    if (screenW > 0 && screenH > 0)
-        m_gesture.SetScreenSize(static_cast<float>(screenW), static_cast<float>(screenH));
-    else
-        logger->Print(LogP_Warn, "GetDisplaySize returned %dx%d: passing raw touches to ImGui", screenW, screenH);
-
     LoadConfig();
+    const auto size = m_config.screenOverride;
+    ImGui_ImplRenderWare_SetScreenSizeOverride(size.width, size.height);
+    if (size.Valid())
+        m_gesture.SetScreenSize(static_cast<float>(size.width), static_cast<float>(size.height));
 
     m_delta = WorldDelta::Load(m_deltaPath);
     if (m_config.startingMoney > 0 && m_delta.money == 0)

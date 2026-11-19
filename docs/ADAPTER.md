@@ -61,6 +61,18 @@ void *addr  = aml->GetSym(m_libHandle, "_ZN5CGame7ProcessEv");
 * Every symbol is resolved defensively: a missing export logs a warning and the
   related feature degrades instead of crashing.
 
+The startup and engine adapter use only early `IAML` slots. From the vtable
+address point (zero-based), these are `GetCurrentGame` (0), `GetConfigPath` (1),
+`GetLib` (4), `GetSym(void *, ...)` (5), `Hook` (6), `GetDataPath` (14), and
+`GetLibHandle(const char *)` (28); the slots are the same on ARMv7 and ARM64.
+The optional CloudSync transport separately uses `GetJavaVM`, part of AML 1.3.0.
+
+The mod does not read display dimensions through the loader. After a render
+context is current, the overlay chooses the configured touch size or the EGL
+draw surface / `GL_VIEWPORT` / `RsGlobal` fallback. The coordinator publishes
+screen and render dimensions together under its mutex; the input hook does not
+query EGL or GLES. `RsGlobal` still defines ImGui's rendering coordinate space.
+
 ## 1.1 No AML JNI facades
 
 `aml->ShowToast()` and `aml->DoVibro()` are JNI facades: AML keeps a `JNIEnv`

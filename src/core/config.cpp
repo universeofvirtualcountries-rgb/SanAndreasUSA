@@ -2,12 +2,21 @@
 
 #include "log.hpp"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace usa1to1 {
 namespace core {
+namespace {
+int ReadPixelDimension(const Json &ui, const char *key, int fallback) {
+    const double value = ui.GetDouble(key, fallback);
+    return value > 0.0 && value <= std::numeric_limits<int>::max() && std::trunc(value) == value
+               ? static_cast<int>(value) : 0;
+}
+} // namespace
 
 Json ModConfig::ToJson() const {
     Json root = Json::Object();
@@ -46,6 +55,8 @@ Json ModConfig::ToJson() const {
     root.Set("cloud_sync", cloud);
 
     Json ui = Json::Object();
+    ui.Set("screen_width", screenOverride.width);
+    ui.Set("screen_height", screenOverride.height);
     ui.Set("show_on_start", showOverlayOnStart);
     ui.Set("show_telemetry", showTelemetry);
     ui.Set("verbose_log", verboseLog);
@@ -84,6 +95,10 @@ bool ModConfig::FromJson(const Json &root, std::string *error) {
             missionsBaseUrl = cl->GetString("missions_base_url", missionsBaseUrl);
         }
         if (const Json *u = root.Find("ui")) {
+            screenOverride = {ReadPixelDimension(*u, "screen_width", screenOverride.width),
+                              ReadPixelDimension(*u, "screen_height", screenOverride.height)};
+            if (!screenOverride.Valid())
+                screenOverride = {};
             showOverlayOnStart = u->GetBool("show_on_start", showOverlayOnStart);
             showTelemetry = u->GetBool("show_telemetry", showTelemetry);
             verboseLog = u->GetBool("verbose_log", verboseLog);

@@ -16,6 +16,9 @@
 
 #include <mod/thirdparty/imgui/imgui_internal.h>
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -44,7 +47,36 @@ bool ProviderScalesTouches() {
 
 // Provider: used only by the first plugin to initialize; it owns the hooks and cross-plugin focus.
 ImGuiShared::Coordinator g_Coordinator;
-int g_screenWidth = 0, g_screenHeight = 0; // written on loader thread before hooks are installed
+using usa1to1::core::PixelSize;
+using usa1to1::core::ResolveTouchScreenSize;
+PixelSize g_screenOverride; // config, set before hooks are installed
+
+// Render thread only. GL_VIEWPORT can describe an offscreen/scaled target,
+// so prefer the EGL draw surface when it has a usable size. Neither is a
+// guaranteed physical touch extent on every device: use the config override there.
+PixelSize DetectTouchScreenSize(PixelSize render) {
+    if (g_screenOverride.Valid())
+        return g_screenOverride;
+    PixelSize surface, viewport;
+    if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+        const EGLDisplay display = eglGetCurrentDisplay();
+        const EGLSurface drawSurface = eglGetCurrentSurface(EGL_DRAW);
+        if (display != EGL_NO_DISPLAY && drawSurface != EGL_NO_SURFACE) {
+            EGLint w = 0, h = 0;
+            if (eglQuerySurface(display, drawSurface, EGL_WIDTH, &w) == EGL_TRUE &&
+                eglQuerySurface(display, drawSurface, EGL_HEIGHT, &h) == EGL_TRUE)
+                surface = {w, h};
+        }
+        if (!surface.Valid()) {
+            GLint vp[4]{};
+            glGetIntegerv(GL_VIEWPORT, vp);
+            // Width/height alone cannot describe a viewport with an offset.
+            if (vp[0] == 0 && vp[1] == 0)
+                viewport = {vp[2], vp[3]};
+        }
+    }
+    return ResolveTouchScreenSize(g_screenOverride, surface, viewport, render);
+}
 
 // Game pointers
 DrawIndexedFn g_pfnDrawIndexed = nullptr;
@@ -176,13 +208,14 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
     io.DeltaTime = deltaTime;
 
     const bool providerScalesTouch = ProviderScalesTouches();
+    const PixelSize screen = providerScalesTouch ? PixelSize{} : DetectTouchScreenSize({width, height});
     for (uint32_t i = 0; i < count; ++i) {
         const ImGuiShared::Touch &ev = events[i];
         float x = ev.x, y = ev.y;
         if (!providerScalesTouch) {
-            const auto mapped = usa1to1::core::ScreenToRender(x, y, g_screenWidth, g_screenHeight, width, height);
+            const auto mapped = usa1to1::core::ScreenToRender(x, y, screen.width, screen.height, width, height);
             g_legacyTouch = {x, y, mapped.x, mapped.y, mapped.scaleX, mapped.scaleY,
-                             g_screenWidth, g_screenHeight, width, height, g_legacyTouch.sequence + 1};
+                             screen.width, screen.height, width, height, g_legacyTouch.sequence + 1};
             x = mapped.x;
             y = mapped.y;
         }
@@ -234,8 +267,8 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
         if (!providerScalesTouch) {
             // A legacy provider compares against unscaled input, so publish
             // screen-space rectangles for this client only.
-            const auto tl = usa1to1::core::ScreenToRender(r.left, r.top, width, height, g_screenWidth, g_screenHeight);
-            const auto br = usa1to1::core::ScreenToRender(r.right, r.bottom, width, height, g_screenWidth, g_screenHeight);
+            const auto tl = usa1to1::core::ScreenToRender(r.left, r.top, width, height, screen.width, screen.height);
+            const auto br = usa1to1::core::ScreenToRender(r.right, r.bottom, width, height, screen.width, screen.height);
             r = {tl.x, tl.y, br.x, br.y};
         }
         rects.push_back(r);
@@ -249,8 +282,7 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
 void ClientReset(void *) { ImGui_ImplRenderWare_Shutdown(); }
 
 void Hooked_AND_TouchEvent(int type, int finger, int x, int y) {
-    if (!g_Coordinator.ProcessTouch(type, finger, static_cast<float>(x), static_cast<float>(y),
-                                    g_screenWidth, g_screenHeight) && orig_AND_TouchEvent)
+    if (!g_Coordinator.ProcessTouch(type, finger, static_cast<float>(x), static_cast<float>(y)) && orig_AND_TouchEvent)
         orig_AND_TouchEvent(type, finger, x, y);
 }
 
@@ -282,7 +314,8 @@ void RenderFrame() {
     }
     g_LastRenderTime = currentClockMS;
 
-    g_Coordinator.Frame(width, height, deltaTime);
+    const auto screen = DetectTouchScreenSize({width, height});
+    g_Coordinator.Frame(width, height, deltaTime, screen.width, screen.height);
 }
 
 void Hooked_MobileMenuRender(void *menu) {
@@ -395,9 +428,8 @@ bool ImGui_ImplRenderWare_InitRenderer() {
     return true;
 }
 
-void ImGui_ImplRenderWare_SetScreenSize(int width, int height) {
-    g_screenWidth = width;
-    g_screenHeight = height;
+void ImGui_ImplRenderWare_SetScreenSizeOverride(int width, int height) {
+    g_screenOverride = {width, height};
 }
 
 ImGuiShared::TouchSample ImGui_ImplRenderWare_LastTouch() {
