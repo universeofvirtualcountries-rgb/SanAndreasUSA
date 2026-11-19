@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
+#include <map>
 
 namespace usa1to1 {
 namespace core {
@@ -79,6 +82,20 @@ void ModelCatalog::Add(const ModelProto &proto) {
     RebuildBuckets();
 }
 
+void ModelCatalog::AddModels(std::vector<ModelProto> protos) {
+    std::map<int, ModelProto> byId;
+    for (auto &p : m_protos)
+        byId.insert_or_assign(p.id, std::move(p));
+    for (auto &p : protos)
+        if (p.id >= 0)
+            byId.insert_or_assign(p.id, std::move(p));
+    m_protos.clear();
+    m_protos.reserve(byId.size());
+    for (auto &entry : byId)
+        m_protos.push_back(std::move(entry.second));
+    RebuildBuckets();
+}
+
 void ModelCatalog::RebuildBuckets() {
     constexpr int kBucketCount = static_cast<int>(PropTag::StreetLight) + 1;
     for (int i = 0; i < kBucketCount; ++i)
@@ -111,11 +128,14 @@ bool ModelCatalog::LoadFromJson(const Json &root, std::string *error) {
             return false;
         }
         Clear();
+        std::vector<ModelProto> parsed;
         for (const auto &m : models->GetArray()) {
             if (!m.IsObject())
                 continue;
             ModelProto p;
-            p.id = static_cast<int>(m.GetInt("id", -1));
+            const auto id = m.GetInt("id", -1);
+            if (id >= 0 && id <= std::numeric_limits<int>::max())
+                p.id = static_cast<int>(id);
             p.name = m.GetString("name", "");
             p.tag = PropTagFromName(m.GetString("tag", "unknown"));
             if (const Json *col = m.Find("col")) {
@@ -130,8 +150,9 @@ bool ModelCatalog::LoadFromJson(const Json &root, std::string *error) {
             p.isDynamic = m.GetBool("dynamic", false);
             if (p.tag == PropTag::Unknown && p.isRoad)
                 p.tag = PropTag::RoadFlat;
-            Add(p);
+            parsed.push_back(std::move(p));
         }
+        AddModels(std::move(parsed));
         USA_LOG_I("ModelCatalog: %zu models, %zu road, %zu buildings", m_protos.size(),
                   ByTag(PropTag::RoadFlat).size(), ByTag(PropTag::Building).size());
         return true;
@@ -216,11 +237,31 @@ const ModelProto *ModelCatalog::PickByTag(PropTag tag, uint64_t rngValue) const 
     return bucket[static_cast<size_t>(rngValue % bucket.size())];
 }
 
-const ModelProto *ModelCatalog::PickRoad() const {
-    const auto &roads = ByTag(PropTag::RoadFlat);
-    if (roads.empty())
-        return nullptr;
-    return roads.front();
+bool IsFlatRoadCandidate(const ModelProto &p) {
+    const Vec3f &h = p.colHalfExtents;
+    const float minSpan = std::min(h.x, h.y);
+    return p.hasCollision && !p.isDynamic && std::isfinite(p.drawDistance) && p.drawDistance >= 30.0f &&
+           std::isfinite(h.x) && std::isfinite(h.y) && std::isfinite(h.z) &&
+           minSpan >= 2.5f && h.z >= 0.0f && h.z <= 1.0f && h.z <= minSpan * 0.15f;
+}
+
+const ModelProto *ModelCatalog::PickRoad(int tableRoad, int whitelistRoad) const {
+    for (const int id : {tableRoad, whitelistRoad})
+        if (const auto *p = Find(id); p && IsFlatRoadCandidate(*p))
+            return p;
+    for (const auto *p : ByTag(PropTag::RoadFlat))
+        if (IsFlatRoadCandidate(*p))
+            return p;
+    const ModelProto *best = nullptr;
+    float area = 0.0f;
+    for (const auto &p : m_protos) {
+        const float footprint = p.colHalfExtents.x * p.colHalfExtents.y;
+        if (IsFlatRoadCandidate(p) && footprint > area) {
+            best = &p;
+            area = footprint;
+        }
+    }
+    return best;
 }
 
 ModelCatalog ModelCatalog::MakeFallback() {

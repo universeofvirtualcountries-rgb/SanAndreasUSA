@@ -117,6 +117,14 @@ float HeightField::HeightAt(double x, double y) {
     return static_cast<float>(h);
 }
 
+float HeightField::ClampGenerationZ(float z) {
+    return std::isnan(z) ? kDefaultGenerationZ : std::clamp(z, 50.0f, 900.0f);
+}
+
+float HeightField::GenerationHeightAt(double x, double y, float baseZ) {
+    return baseZ + HeightAt(x, y);
+}
+
 float HeightField::SlopeAt(double x, double y) {
     constexpr double kEps = 2.0;
     const float hx1 = HeightAt(x + kEps, y);

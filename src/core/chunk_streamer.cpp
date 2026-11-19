@@ -93,6 +93,13 @@ int ChunkStreamer::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
         SpawnPendingProps(kv.second, origin, budget);
     }
 
+    const double now = m_bridge.NowSeconds();
+    if (m_statsDirty && now >= m_nextStatsLog) {
+        USA_LOG_I("ChunkStreamer: requested=%zu loaded=%zu failed=%zu spawn_failed=%zu pending_props=%zu objects=%zu",
+                  m_requested, m_loaded, m_failed, m_spawnFailed, PendingCount(), ObjectCount());
+        m_statsDirty = false;
+        m_nextStatsLog = now + 2.0;
+    }
     if (added > 0)
         USA_LOG_D("ChunkStreamer: +%d chunks, active=%d objects=%zu pending=%zu markers=%zu", added,
                   ActiveChunkCount(), ObjectCount(), PendingCount(), MarkerCount());
@@ -104,11 +111,16 @@ void ChunkStreamer::BuildChunk(const ChunkContent &content, const Vec2d &origin)
     chunk.coord = content.coord;
     chunk.seed = content.seed;
 
+    chunk.requestedAt = m_bridge.NowSeconds();
     for (int modelId : content.requiredModels) {
         if (modelId < 0)
             continue;
-        m_bridge.RequestModel(modelId, false);
-        chunk.models.push_back(modelId);
+        ++m_requested;
+        m_statsDirty = true;
+        if (m_bridge.RequestModel(modelId, false))
+            chunk.models.emplace(modelId, ActiveChunk::ModelState::Pending);
+        else
+            ++m_failed;
     }
 
     chunk.pending = content.props;
@@ -135,12 +147,31 @@ bool ChunkStreamer::SpawnPendingProps(ActiveChunk &chunk, const Vec2d &origin, i
 
     const Vec2d chunkOrigin = ChunkGenerator::ChunkOriginGlobal(chunk.coord.x, chunk.coord.y);
     bool spawnedAny = false;
+    const double now = m_bridge.NowSeconds();
     for (auto it = chunk.pending.begin(); it != chunk.pending.end();) {
         if (budget <= 0)
             break;
-        if (!m_bridge.IsModelLoaded(it->modelId)) {
-            ++it;
+        const auto state = chunk.models.find(it->modelId);
+        using State = ActiveChunk::ModelState;
+        if (state == chunk.models.end() || state->second == State::Failed) {
+            it = chunk.pending.erase(it);
             continue;
+        }
+        if (!m_bridge.IsModelLoaded(it->modelId)) {
+            if (now - chunk.requestedAt >= 10.0) {
+                state->second = State::Failed;
+                ++m_failed;
+                m_statsDirty = true;
+                it = chunk.pending.erase(it);
+            } else {
+                ++it;
+            }
+            continue;
+        }
+        if (state->second == State::Pending) {
+            state->second = State::Loaded;
+            ++m_loaded;
+            m_statsDirty = true;
         }
 
         SpawnParams params;
@@ -156,10 +187,13 @@ bool ChunkStreamer::SpawnPendingProps(ActiveChunk &chunk, const Vec2d &origin, i
         StreamedObject obj;
         obj.modelId = it->modelId;
         obj.handle = m_bridge.CreateObject(params);
+        --budget;
         if (obj.handle) {
             chunk.objects.push_back(obj);
-            --budget;
             spawnedAny = true;
+        } else {
+            ++m_spawnFailed;
+            m_statsDirty = true;
         }
         it = chunk.pending.erase(it);
     }
@@ -177,8 +211,8 @@ void ChunkStreamer::UnloadChunk(std::pair<int64_t, int64_t> key) {
         m_bridge.RemoveMarker(markerId);
         m_doorMarkers.erase(markerId);
     }
-    for (int modelId : it->second.models)
-        m_bridge.ReleaseModel(modelId);
+    for (const auto &entry : it->second.models)
+        m_bridge.ReleaseModel(entry.first);
 
     m_active.erase(it);
 }

@@ -22,6 +22,7 @@ class MockBridge : public core::IEngineBridge {
         core::Vec3f pos;
         bool interior = false;
         float heading = 0.0f;
+        bool collision = false;
     };
     struct MarkerRec {
         core::Vec3f pos;
@@ -158,6 +159,7 @@ class MockBridge : public core::IEngineBridge {
         rec.pos = params.pos;
         rec.interior = params.interior;
         rec.heading = params.headingRad;
+        rec.collision = params.collision;
         const uintptr_t handle = nextHandle++;
         objects[handle] = rec;
         ++created;

@@ -9,8 +9,8 @@ Android.mk. The undefined-symbol error appears only in CI, on a device build.
 Checks
 ------
 * every .cpp under src/, mod/ and plugin-sdk/renderware/imgui is listed in
-  CMakeLists.txt (MOD_SOURCES + CORE_SOURCES) and in Android.mk;
-* both lists agree with each other;
+  CMakeLists.txt (MOD_SOURCES + CORE_SOURCES), Android.mk and the ARM check;
+* all lists agree with each other;
 * every listed file exists.
 
 Usage: python3 tools/check_source_lists.py [--verbose]
@@ -81,6 +81,12 @@ def android_mk() -> set[str]:
     return {token for token in _mk_block(text, "LOCAL_SRC_FILES") if token.endswith(".cpp")}
 
 
+def arm_check() -> set[str]:
+    text = (ROOT / "tools/arm_compile_check.sh").read_text(encoding="utf-8")
+    match = re.search(r"^SOURCES=\(\n(.*?)^\)", text, re.S | re.M)
+    return set(match.group(1).split()) if match else set()
+
+
 def report(label: str, missing: set[str], extra: set[str], verbose: bool) -> int:
     problems = 0
     for path in sorted(missing):
@@ -102,10 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     disk = files_on_disk()
     cmake = cmake_lists()
     ndk = android_mk()
+    arm = arm_check()
 
     problems = 0
     problems += report("CMakeLists.txt", disk - cmake, cmake - disk, args.verbose)
     problems += report("Android.mk", disk - ndk, ndk - disk, args.verbose)
+    problems += report("tools/arm_compile_check.sh", disk - arm, arm - disk, args.verbose)
 
     if problems:
         print(f"source lists out of sync: {problems} problem(s)")

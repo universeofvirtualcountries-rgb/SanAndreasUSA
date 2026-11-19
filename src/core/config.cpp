@@ -30,6 +30,7 @@ Json ModConfig::ToJson() const {
     content.Set("interiors", interiorsEnabled);
     content.Set("door_markers", doorMarkersEnabled);
     content.Set("auto_polygon", autoStartPolygon);
+    content.Set("generation_z", static_cast<double>(generationZ));
     content.Set("spawn_city", spawnCity);
     content.Set("teleport_on_first_load", teleportOnFirstLoad);
     content.Set("door_trigger_radius", static_cast<double>(doorTriggerRadius));
@@ -72,6 +73,7 @@ bool ModConfig::FromJson(const Json &root, std::string *error) {
             spawnCity = c->GetString("spawn_city", spawnCity);
             teleportOnFirstLoad = c->GetBool("teleport_on_first_load", teleportOnFirstLoad);
             doorTriggerRadius = static_cast<float>(c->GetDouble("door_trigger_radius", doorTriggerRadius));
+            generationZ = HeightField::ClampGenerationZ(static_cast<float>(c->GetDouble("generation_z", generationZ)));
             startingMoney = c->GetInt("starting_money", startingMoney);
             modelIdLimit = static_cast<int>(c->GetInt("model_id_limit", modelIdLimit));
         }

@@ -130,7 +130,7 @@ template <class T> inline bool IsUsableTableEntry(T *const *table, int index, T 
 }
 
 inline std::string HexPointer(const void *p) {
-    char buf[2 + 2 * sizeof(uintptr_t)] = {0};
+    char buf[3 + 2 * sizeof(uintptr_t)] = {0};
     std::snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p)));
     return std::string(buf);
 }

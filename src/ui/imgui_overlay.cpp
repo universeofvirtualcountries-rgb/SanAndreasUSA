@@ -66,13 +66,10 @@ void ImGuiOverlay::RenderCallback() {
         g_overlay->Draw();
 }
 
-// Small, always visible "[USA 1:1]" pill in the top-left corner. The two-finger
-// swipe stays, but vendor touch layers and the game itself can swallow a swipe,
-// so there is a plain one-tap way in - and a matching corner-tap detector in
-// core::CornerTapDetector as a fallback when ImGui gets no input at all.
+// Small, always visible pill at the top center of the render surface.
 void ImGuiOverlay::DrawCornerButton() {
     const ImVec4 bg(0.05f, 0.05f, 0.08f, 0.42f);
-    ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f - 59.0f, 12.0f), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(118.0f, 36.0f), ImGuiCond_Always);
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -132,7 +129,7 @@ void ImGuiOverlay::Draw() {
         if (ImGui::BeginTabItem("Telemetry")) {
             m_selectedTab = 0;
             ImGui::Text("Global: %.1f, %.1f", t.globalX, t.globalY);
-            ImGui::Text("Local:  %.1f, %.1f (limit 1000)", t.localPos.x, t.localPos.y);
+            ImGui::Text("Local:  %.1f, %.1f, Z %.1f (XY limit 1000)", t.localPos.x, t.localPos.y, t.localZ);
             ImGui::Text("Origin offset: %.1f, %.1f", t.offsetX, t.offsetY);
             ImGui::Separator();
             ImGui::Text("Region: %s", m_model.regionLabel.c_str());
@@ -142,6 +139,9 @@ void ImGuiOverlay::Draw() {
             ImGui::Text("Chunk: %lld, %lld", static_cast<long long>(t.chunkX), static_cast<long long>(t.chunkY));
             ImGui::Text("Chunk seed: %016llX", static_cast<unsigned long long>(t.chunkSeed));
             ImGui::Text("Active chunks: %d", t.activeChunks);
+            char touchLine[256];
+            ImGui_ImplRenderWare_FormatTouch(ImGui_ImplRenderWare_LastTouch(), touchLine, sizeof(touchLine));
+            ImGui::TextWrapped("%s", touchLine);
             ImGui::Text("Mod objects: %d (owned %zu)", t.activeObjects, m_model.ownedObjects);
             ImGui::Text("Streamed entities: %d", t.streamedEntities);
             ImGui::Text("FPS: %.1f", t.fps);

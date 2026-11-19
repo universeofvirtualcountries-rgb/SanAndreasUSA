@@ -1,5 +1,6 @@
 #include "imgui_impl_renderware.h"
 #include "imgui_shared.h"
+#include "core/screen_to_render.hpp"
 
 #include <mod/amlmod.h>
 #include <mod/interface.h>
@@ -16,6 +17,9 @@
 #include <mod/thirdparty/imgui/imgui_internal.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -32,9 +36,15 @@ ImGuiContext *g_pImGuiContext = nullptr;
 ImGui_RenderCallback g_UserRenderCallback = nullptr;
 const ImGuiShared::API *g_pSharedAPI = nullptr;
 ImGuiShared::Handle g_hClient = 0;
+ImGuiShared::TouchSample g_legacyTouch{}; // render thread only
+
+bool ProviderScalesTouches() {
+    return g_pSharedAPI && g_pSharedAPI->bytes >= sizeof(ImGuiShared::API) && g_pSharedAPI->lastTouch;
+}
 
 // Provider: used only by the first plugin to initialize; it owns the hooks and cross-plugin focus.
 ImGuiShared::Coordinator g_Coordinator;
+int g_screenWidth = 0, g_screenHeight = 0; // written on loader thread before hooks are installed
 
 // Game pointers
 DrawIndexedFn g_pfnDrawIndexed = nullptr;
@@ -165,10 +175,19 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     io.DeltaTime = deltaTime;
 
+    const bool providerScalesTouch = ProviderScalesTouches();
     for (uint32_t i = 0; i < count; ++i) {
         const ImGuiShared::Touch &ev = events[i];
+        float x = ev.x, y = ev.y;
+        if (!providerScalesTouch) {
+            const auto mapped = usa1to1::core::ScreenToRender(x, y, g_screenWidth, g_screenHeight, width, height);
+            g_legacyTouch = {x, y, mapped.x, mapped.y, mapped.scaleX, mapped.scaleY,
+                             g_screenWidth, g_screenHeight, width, height, g_legacyTouch.sequence + 1};
+            x = mapped.x;
+            y = mapped.y;
+        }
         io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
-        io.AddMousePosEvent(ev.x, ev.y);
+        io.AddMousePosEvent(x, y);
         if (ev.type == 2 /* TOUCH_PUSH */)
             io.AddMouseButtonEvent(0, true);
         else if (ev.type == 1 /* TOUCH_POP */ || ev.type == 4 /* TOUCH_CANCEL */)
@@ -178,6 +197,24 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
     const float uiScale = std::clamp(static_cast<float>(height) / 720.0f, 0.8f, 2.0f);
     ImGui::GetStyle().FontSizeBase = 22.0f * uiScale;
     ImGui::GetStyle().FramePadding = ImVec2(10.0f * uiScale, 6.0f * uiScale);
+
+    // The snapshot includes captured and pass-through touches. Log on the render
+    // thread, not in the hot input callback (also works while paused).
+    static uint64_t loggedSequence = 0;
+    static auto lastLog = std::chrono::steady_clock::time_point::min();
+    const auto sample = ImGui_ImplRenderWare_LastTouch();
+    const auto now = std::chrono::steady_clock::now();
+    if (sample.sequence != loggedSequence &&
+        (loggedSequence == 0 || now - lastLog >= std::chrono::seconds(2))) {
+        char line[256];
+        ImGui_ImplRenderWare_FormatTouch(sample, line, sizeof(line));
+        if (sample.screenW <= 0 || sample.screenH <= 0 || sample.renderW <= 0 || sample.renderH <= 0)
+            logger->Print(LogP_Warn, "%s (missing dimensions; raw fallback)", line);
+        else
+            logger->Info("%s", line);
+        loggedSequence = sample.sequence;
+        lastLog = now;
+    }
 
     ImGui::NewFrame();
 
@@ -191,8 +228,17 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
     // active and would swallow taps on the radar and the top-left of the pause map.
     std::vector<ImGuiShared::Rect> rects;
     for (const ImGuiWindow *win : g_pImGuiContext->Windows) {
-        if (win->Active && !win->Hidden && !(win->Flags & (ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_ChildWindow)))
-            rects.push_back({win->Pos.x, win->Pos.y, win->Pos.x + win->Size.x, win->Pos.y + win->Size.y});
+        if (!win->Active || win->Hidden || (win->Flags & (ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_ChildWindow)))
+            continue;
+        ImGuiShared::Rect r{win->Pos.x, win->Pos.y, win->Pos.x + win->Size.x, win->Pos.y + win->Size.y};
+        if (!providerScalesTouch) {
+            // A legacy provider compares against unscaled input, so publish
+            // screen-space rectangles for this client only.
+            const auto tl = usa1to1::core::ScreenToRender(r.left, r.top, width, height, g_screenWidth, g_screenHeight);
+            const auto br = usa1to1::core::ScreenToRender(r.right, r.bottom, width, height, g_screenWidth, g_screenHeight);
+            r = {tl.x, tl.y, br.x, br.y};
+        }
+        rects.push_back(r);
     }
     g_pSharedAPI->setRects(g_pSharedAPI->state, g_hClient, rects.data(), static_cast<uint32_t>(rects.size()));
 
@@ -203,10 +249,8 @@ void ClientFrame(void *, const ImGuiShared::Touch *events, uint32_t count, int32
 void ClientReset(void *) { ImGui_ImplRenderWare_Shutdown(); }
 
 void Hooked_AND_TouchEvent(int type, int finger, int x, int y) {
-    // shortcut: touch coordinates are taken as render pixels (true on tested devices); pass the view size as the
-    // last two arguments if a device renders at a different resolution than its screen.
-    if (!g_Coordinator.ProcessTouch(type, finger, static_cast<float>(x), static_cast<float>(y), 0, 0) &&
-        orig_AND_TouchEvent)
+    if (!g_Coordinator.ProcessTouch(type, finger, static_cast<float>(x), static_cast<float>(y),
+                                    g_screenWidth, g_screenHeight) && orig_AND_TouchEvent)
         orig_AND_TouchEvent(type, finger, x, y);
 }
 
@@ -291,6 +335,10 @@ void SharedSetRects(void *state, ImGuiShared::Handle id, const ImGuiShared::Rect
     static_cast<ImGuiShared::Coordinator *>(state)->SetRects(id, rects, count);
 }
 
+void SharedLastTouch(void *state, ImGuiShared::TouchSample *out) {
+    *out = static_cast<ImGuiShared::Coordinator *>(state)->LastTouch();
+}
+
 // The first plugin to initialize publishes its coordinator through AML and installs the hooks; later plugins
 // join it, so the touched plugin's windows draw on top of the others. AML cannot unhook or unregister an
 // interface, so the provider plugin must stay loaded for the whole session.
@@ -298,10 +346,10 @@ const ImGuiShared::API *AcquireSharedAPI() {
     static const ImGuiShared::API *const api = [] {
         using namespace ImGuiShared;
         const auto *existing = static_cast<const API *>(GetInterface(interfaceName));
-        if (existing && existing->version == version && existing->bytes >= sizeof(API))
+        if (existing && existing->version == version && existing->bytes >= offsetof(API, lastTouch))
             return existing;
 
-        static API local{version, sizeof(API), &g_Coordinator, SharedAdd, SharedRemove, SharedSetRects};
+        static API local{version, sizeof(API), &g_Coordinator, SharedAdd, SharedRemove, SharedSetRects, SharedLastTouch};
         if (existing)
             logger->Error("ImGui/RW: shared ImGui interface v%u is incompatible; windows will not share focus",
                           existing->version);
@@ -345,6 +393,29 @@ bool ImGui_ImplRenderWare_InitRenderer() {
     platform.DrawCallback_SetSamplerLinear = SetSamplerLinear;
     platform.DrawCallback_SetSamplerNearest = SetSamplerNearest;
     return true;
+}
+
+void ImGui_ImplRenderWare_SetScreenSize(int width, int height) {
+    g_screenWidth = width;
+    g_screenHeight = height;
+}
+
+ImGuiShared::TouchSample ImGui_ImplRenderWare_LastTouch() {
+    ImGuiShared::TouchSample sample{};
+    if (!ProviderScalesTouches())
+        return g_legacyTouch;
+    g_pSharedAPI->lastTouch(g_pSharedAPI->state, &sample);
+    return sample;
+}
+
+void ImGui_ImplRenderWare_FormatTouch(const ImGuiShared::TouchSample &sample, char *out, size_t size) {
+    if (!sample.sequence) {
+        std::snprintf(out, size, "touch raw -> imgui: no sample yet");
+        return;
+    }
+    std::snprintf(out, size, "touch raw (%.1f, %.1f) -> imgui (%.1f, %.1f) | scale %.3f x %.3f | screen %dx%d vs render %dx%d",
+                  sample.rawX, sample.rawY, sample.x, sample.y, sample.scaleX, sample.scaleY,
+                  sample.screenW, sample.screenH, sample.renderW, sample.renderH);
 }
 
 bool ImGui_ImplRenderWare_Init(ImGui_RenderCallback renderCallback) {

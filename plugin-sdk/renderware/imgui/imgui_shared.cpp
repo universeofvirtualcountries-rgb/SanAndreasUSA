@@ -1,5 +1,7 @@
 #include "imgui_shared.h"
 
+#include "core/screen_to_render.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
@@ -41,10 +43,11 @@ bool Coordinator::ProcessTouch(int type, int finger, float x, float y, int windo
     if (finger < 0 || finger >= static_cast<int>(owners.size()) || !std::isfinite(x) || !std::isfinite(y))
         return false;
     const std::lock_guard<std::mutex> lock(mutex);
-    if (windowWidth > 0 && windowHeight > 0 && width > 0 && height > 0) {
-        x *= static_cast<float>(width) / windowWidth;
-        y *= static_cast<float>(height) / windowHeight;
-    }
+    const auto mapped = usa1to1::core::ScreenToRender(x, y, windowWidth, windowHeight, width, height);
+    lastTouch = {x, y, mapped.x, mapped.y, mapped.scaleX, mapped.scaleY,
+                 windowWidth, windowHeight, width, height, lastTouch.sequence + 1};
+    x = mapped.x;
+    y = mapped.y;
     if (type == 2) {
         captured[finger] = false;
         owners[finger] = 0;
@@ -81,6 +84,11 @@ bool Coordinator::ProcessTouch(int type, int finger, float x, float y, int windo
         owners[finger] = 0;
     }
     return consumed;
+}
+
+TouchSample Coordinator::LastTouch() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    return lastTouch;
 }
 
 void Coordinator::Frame(int newWidth, int newHeight, float deltaTime) {

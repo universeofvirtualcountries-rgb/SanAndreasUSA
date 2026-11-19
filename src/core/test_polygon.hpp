@@ -5,6 +5,7 @@
 #pragma once
 
 #include "engine_bridge.hpp"
+#include "heightfield.hpp"
 #include "model_catalog.hpp"
 #include "types.hpp"
 
@@ -28,6 +29,7 @@ class TestPolygon {
         int aheadTiles = 10;
         int behindTiles = 2;
         double markerSpacing = 200.0;
+        float generationZ = HeightField::kDefaultGenerationZ;
         int markerAhead = 2; // markers around the player, in each direction
     };
 
@@ -43,20 +45,29 @@ class TestPolygon {
     // spawns new ones ahead; creates/removes the 200 m markers.
     void Update(const Vec2d &playerGlobal, const Vec2d &origin);
 
+    void OnOriginShift(const Vec2d &origin);
+
     size_t TileCount() const { return m_tiles.size(); }
     size_t MarkerCount() const { return m_markers.size(); }
-    bool HasVisuals() const { return m_roadModel >= 0; }
+    bool HasVisuals() const { return !m_tiles.empty(); }
     int RoadModel() const { return m_roadModel; }
     int64_t TileIndexAt(double globalY) const;
 
   private:
     void Clear();
+    void RestorePlayerHeight(const Vec2d &origin, bool recenter);
 
     IEngineBridge &m_bridge;
     ModelCatalog m_catalog;
     Config m_config;
     bool m_active = false;
     int m_roadModel = -1;
+    bool m_requested = false;
+    float m_tileHeading = 0.0f;
+    double m_tileLength = 20.0;
+    Vec3f m_tileOffset;
+    double m_nextSpawnAttempt = 0.0;
+    double m_nextRecoveryLog = 0.0;
     double m_roadX = 0.0;      // global X of the road centreline
     double m_startY = 0.0;     // global Y where the polygon started
     std::map<int64_t, PolygonTile> m_tiles;

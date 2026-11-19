@@ -21,7 +21,7 @@ If the *Actions* tab has no `Build libUSA1to1.so` workflow yet, enable it once v
 | GTA SA **2.00** | 32-bit installs | `armeabi-v7a` |
 | GTA SA **2.10+** | 64-bit installs | `arm64-v8a` |
 
-Newer installs are 64-bit only; the `armeabi-v7a` library is still shipped for 2.00.
+Use **AML 1.4.0 or newer** for `GetDisplaySize()`. Newer game installs are 64-bit only; the `armeabi-v7a` library is still shipped for 2.00.
 
 ## 3. Unpack
 
@@ -30,6 +30,7 @@ Newer installs are 64-bit only; the `armeabi-v7a` library is still shipped for 2
 ├── lib/arm64-v8a/libUSA1to1.so      (or lib/armeabi-v7a/…)
 ├── assets/
 │   ├── manifest.json
+│   ├── model_whitelist.json
 │   ├── missions/mission_001_robbery.json
 │   ├── missions/mission_002_presidential_hit.json
 │   └── objects_db.sample.json
@@ -49,12 +50,10 @@ Grant storage permission to the game, otherwise the mod cannot write
 2. The mod teleports you to **Los Angeles** on the 1:1 plane (configurable:
    `content.spawn_city` in `config.json`).
 3. Open the overlay with a **two-finger swipe down** anywhere, or tap the small
-   semi-transparent **[USA 1:1]** pill in the top-left corner (drawn even while
-   the menu is closed; tap it again to close). The corner tap goes through the
-   mod's own touch hook, so it works on devices where the game swallows the
-   swipe.
+   semi-transparent **[USA 1:1]** pill at the top center (tap again to close).
 4. `Polygon` tab → *Start polygon* spawns the endless road with a yellow marker
-   every 200 m. Drive it and watch `Origin shifts` in the telemetry tab climb.
+   every 200 m at `content.generation_z` (300 m by default, clamped to 50–900).
+   You start 2 m above the road. Drive it and watch `Origin shifts` in Telemetry.
 5. `Teleports` tab → jump to New York / Washington / Las Vegas / Los Angeles.
 6. `Missions` tab → start a JSON mission. The state is saved in `world_delta.json`.
 7. Short status messages ("Entering shop...", "Mission complete", "+$2500")
@@ -69,8 +68,9 @@ python3 tools/parse_ide.py --game /path/to/extracted/GTA_SA --out objects_db.jso
 adb push objects_db.json /sdcard/AMLMods/com.rockstargames.gtasa/USA1to1/assets/
 ```
 
-Without that file the mod scans the game's own `CModelInfo` at runtime and writes
-`assets/objects_db_live.json` so you can see what it found.
+The mod resolves database and bundled whitelist names against the live game,
+then uses validated numeric candidates (3000–18000) as a fallback.
+`assets/objects_db_live.json` records what the game actually accepted.
 
 ## 6. Files the mod writes
 
@@ -99,12 +99,15 @@ full mission re-sync.
 * **No overlay** — check the AML log (`logcat | grep USA1to1`) for
   `Overlay: ImGui RenderWare backend failed to initialise`; the mod keeps running
   headless and streaming still works.
-* **Nothing spawns** — the catalogue is empty: see section 5. Markers still appear.
-  Check the log for `live catalogue built, N models, K slots rejected`: `K > 0`
-  with `N == 0` means the model table on this build is not where the ids live -
-  raise or lower `content.model_id_limit` in `config.json` (default 20000, stock
-  2.00 size; Fastman92 users can go up to 26316).
+* **Taps miss** — look for `touch raw … -> imgui` in Telemetry / `logcat`. It
+  reports both sizes and scale factors. If a different mod owns the legacy
+  RenderWare ImGui provider, only touches captured by USA1to1 appear there.
+* **Nothing spawns** — look for `Adapter: catalogue=…`, then the rejection counts
+  and the first eight `ms_modelInfoPtrs` slots if the catalogue is empty. Compare
+  `requested`, `loaded`, and `failed` in the `ChunkStreamer` and `TestPolygon` logs.
+  Keep `content.model_id_limit` at the actual table size (stock default 20000,
+  up to 26316 for supported limit-adjusted setups).
 * **Game stutters when moving fast** — lower `streaming.max_chunks_per_update` /
   `max_spawns_per_update` in `config.json`.
-* **Wrong props in buildings** — your `objects_db.json` came from another game/mod;
-  regenerate it from your own files.
+* **Unexpected props in buildings** — regenerate `objects_db.json` from your
+  own game files to improve tags over the live name heuristics.

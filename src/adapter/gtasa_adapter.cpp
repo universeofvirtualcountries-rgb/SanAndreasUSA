@@ -32,7 +32,9 @@
 #include <sys/stat.h>
 #include <vector>
 #include <filesystem>
-#include <sys/stat.h>
+#include <fstream>
+#include <iterator>
+#include <unordered_set>
 
 using namespace usa1to1::core;
 
@@ -165,7 +167,8 @@ bool GTASAAdapter::VerifyEngineSymbols() {
     m_syms.worldAdd = Symbol("_ZN6CWorld3AddEP7CEntity") != nullptr;
     m_syms.worldRemove = Symbol("_ZN6CWorld6RemoveEP7CEntity") != nullptr;
     m_syms.objectCreate = Symbol("_ZN7CObject6CreateEib") != nullptr;
-    m_syms.modelInfo = Symbol("_ZN10CModelInfo18IsVehicleModelTypeEi") != nullptr;
+    m_modelByName = Symbol("_ZN10CModelInfo12GetModelInfoEPKcPi");
+    m_syms.modelInfo = m_modelByName != nullptr;
     m_syms.findPlayer = Symbol("_Z13FindPlayerPedi") != nullptr;
     m_syms.findVehicle = Symbol("_Z17FindPlayerVehicleib") != nullptr;
     m_syms.markers =
@@ -251,11 +254,6 @@ bool GTASAAdapter::InitializeRuntime() {
         m_lastError = "runtime requested before the loader stage completed";
         return false;
     }
-
-    if (m_syms.modelInfo)
-        ProbeRoadModel();
-    else
-        USA_LOG_W("Adapter: model info unavailable, road model stays unknown");
 
     m_runtimeReady = true;
     USA_LOG_I("Adapter: runtime ready (streaming/pools/model info are live)");
@@ -379,7 +377,7 @@ void GTASAAdapter::OnGameShutdown() {
 bool GTASAAdapter::IsEngineLoaded() {
     if (!m_ready || !m_syms.findPlayer || !m_syms.streaming)
         return false;
-    return FindPlayerPed(0) != nullptr;
+    return CStreaming::IsInitialised() && FindPlayerPed(0) != nullptr;
 }
 
 bool GTASAAdapter::IsGameReady() {
@@ -413,6 +411,22 @@ void GTASAAdapter::SetPlayerPosition(const Vec3f &pos) {
     ped->Teleport(ToCV(pos), false);
     ped->UpdateRwFrame();
     phys->m_vecMoveSpeed = savedSpeed; // teleport must never eat inertia
+}
+
+void GTASAAdapter::RecoverPlayerPosition(const Vec3f &pos) {
+    Vec3f from;
+    if (!GetPlayerPosition(from))
+        return;
+    const Vec3f delta = pos - from;
+    CVehicle *vehicle = m_syms.findVehicle ? FindPlayerVehicle(0, false) : nullptr;
+    if (vehicle) {
+        ShiftPlayerVehicle(delta);
+        vehicle->m_vecMoveSpeed.z = 0.0f;
+    }
+    SetPlayerPosition(pos);
+    if (auto *ped = FindPlayerPed(0))
+        ped->m_vecMoveSpeed.z = 0.0f;
+    ShiftCamera(delta);
 }
 
 bool GTASAAdapter::IsPlayerInVehicle() {
@@ -591,7 +605,7 @@ bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
     (void)dynamic;
     if (!m_runtimeReady || !m_syms.streaming || !m_syms.requestModel)
         return false;
-    if (modelId < 0 || modelId >= kMaxModelIds)
+    if (modelId < 0 || modelId >= ModelScanLimit())
         return false;
     if (!CStreaming::IsInitialised())
         return false;
@@ -604,7 +618,7 @@ bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
 bool GTASAAdapter::IsModelLoaded(int modelId) {
     if (!m_runtimeReady || !m_syms.streaming)
         return false;
-    if (modelId < 0 || modelId >= kMaxModelIds)
+    if (modelId < 0 || modelId >= ModelScanLimit())
         return false;
     if (!CStreaming::IsInitialised())
         return false;
@@ -619,7 +633,7 @@ bool GTASAAdapter::IsModelLoaded(int modelId) {
 void GTASAAdapter::ReleaseModel(int modelId) {
     if (!m_runtimeReady || !m_syms.streaming || !m_syms.releaseModel)
         return;
-    if (modelId < 0 || modelId >= kMaxModelIds || !CStreaming::IsInitialised())
+    if (modelId < 0 || modelId >= ModelScanLimit() || !CStreaming::IsInitialised())
         return;
     CStreaming::SetModelIsDeletable(modelId);
 }
@@ -638,7 +652,8 @@ void GTASAAdapter::FlushModelStreaming() {
 // ---------------------------------------------------------------------------
 
 ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
-    if (params.modelId < 0 || params.modelId >= kMaxModelIds || !CStreaming::IsInitialised())
+    if (!m_syms.objectCreate || !m_syms.worldAdd || !m_syms.worldRemove ||
+        params.modelId < 0 || params.modelId >= ModelScanLimit())
         return {};
     if (!IsModelLoaded(params.modelId))
         return {};
@@ -647,20 +662,18 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     if (!obj)
         return {};
 
-    obj->bUsesCollision = params.collision ? 1 : 0;
+    obj->bIsStatic = !params.dynamic;
+    obj->bApplyGravity = params.dynamic;
+    obj->bUsesCollision = params.collision;
 
-    CWorld::Add(obj);
-
-    // Move it into place and orient it. Teleport keeps the rotation, so we set
-    // the Z rotation afterwards and re-sync the RenderWare matrix.
-    const CVector target = ToCV(params.pos);
-    obj->Teleport(target, false);
-    CMatrix *mtx = obj->GetMatrix();
-    if (mtx) {
+    // Insert into the world's spatial lists only after the final transform.
+    if (CMatrix *mtx = obj->GetMatrix())
         mtx->SetRotateZOnly(params.headingRad);
-        mtx->GetPosition() = target;
-    }
+    else
+        obj->m_placement.m_fHeading = params.headingRad;
+    obj->GetPosition() = ToCV(params.pos);
     obj->UpdateRwFrame();
+    CWorld::Add(obj);
 
     OwnedObject owned;
     owned.pointer = reinterpret_cast<uintptr_t>(obj);
@@ -899,74 +912,7 @@ std::string GTASAAdapter::ModDirectory() {
     return ".";
 }
 
-int GTASAAdapter::ProbeRoadModel() {
-    if (m_roadModel != -2)
-        return m_roadModel;
-    m_roadModel = -1;
-
-    CBaseModelInfo **table = CModelInfo::ms_modelInfoPtrs;
-    if (!table) {
-        USA_LOG_W("Adapter: CModelInfo not resolved, road model unknown");
-        return m_roadModel;
-    }
-    if (!core::IsMappedRange(table, sizeof(*table))) {
-        USA_LOG_E("Adapter: CModelInfo table at %s is not mapped, road model unknown",
-                  core::HexPointer(table).c_str());
-        return m_roadModel;
-    }
-
-    const int limit = ModelScanLimit();
-    int rejectedFirstPass = 0;
-    int rejectedSecondPass = 0;
-
-    // 1) Trust the game's own road flag on atomic models.
-    for (int i = kModelScanFirst + 212 /* 612 */; i < limit; ++i) {
-        CBaseModelInfo *info = nullptr;
-        if (!core::IsUsableTableEntry(table, i, info, sizeof(CBaseModelInfo))) {
-            ++rejectedFirstPass;
-            continue;
-        }
-        if (!info->m_szModelName[0])
-            continue;
-        if (info->bIsLod || !info->m_pColModel)
-            continue;
-        if (CModelInfo::IsVehicleModelType(i))
-            continue;
-        if (!info->bIsRoad)
-            continue;
-        if (info->m_fDrawDistance < 30.0f)
-            continue;
-        m_roadModel = i;
-        USA_LOG_I("Adapter: road model from bIsRoad flag = %d (%s)", i, info->m_szModelName);
-        return m_roadModel;
-    }
-
-    // 2) Fall back to name heuristics among flat, collidable atomics.
-    for (int i = kModelScanFirst + 212 /* 612 */; i < limit; ++i) {
-        CBaseModelInfo *info = nullptr;
-        if (!core::IsUsableTableEntry(table, i, info, sizeof(CBaseModelInfo))) {
-            ++rejectedSecondPass;
-            continue;
-        }
-        if (!info->m_szModelName[0] || info->bIsLod || !info->m_pColModel)
-            continue;
-        if (CModelInfo::IsVehicleModelType(i))
-            continue;
-        const std::string name = LowerCopy(info->m_szModelName);
-        if (name.find("road") == std::string::npos && name.find("pave") == std::string::npos &&
-            name.find("asphalt") == std::string::npos)
-            continue;
-        m_roadModel = i;
-        USA_LOG_I("Adapter: road model by name = %d (%s)", i, info->m_szModelName);
-        return m_roadModel;
-    }
-
-    if (rejectedFirstPass + rejectedSecondPass > 0)
-        USA_LOG_W("Adapter: road probe skipped %d unmapped model slots (limit %d)",
-                  rejectedFirstPass + rejectedSecondPass, limit);
-    USA_LOG_W("Adapter: no road model found; test polygon will be marker-only");
-    return m_roadModel;
-}
+int GTASAAdapter::ProbeRoadModel() { return m_roadModel; }
 
 int GTASAAdapter::CountStreamedEntities() {
     int count = 0;
@@ -983,76 +929,181 @@ int GTASAAdapter::CountStreamedEntities() {
 // Live catalogue scan
 // ---------------------------------------------------------------------------
 
-int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out) {
-    CBaseModelInfo **table = CModelInfo::ms_modelInfoPtrs;
+int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out, const std::string &assetDir) {
+    // Prefer the relocated array export: the SDK's fixed GOT slot is only a
+    // fallback for the versions whose offsets it describes.
+    auto **table = static_cast<CBaseModelInfo **>(Symbol("_ZN10CModelInfo16ms_modelInfoPtrsE"));
     if (!table) {
-        USA_LOG_W("Adapter: cannot scan models, CModelInfo unavailable");
-        return 0;
+        auto ***slot = reinterpret_cast<CBaseModelInfo ***>(m_gameBase + BYBIT(0x6796D4, 0x850DB8));
+        if (IsMappedRange(slot, sizeof(*slot)))
+            table = *slot;
     }
-    if (!core::IsMappedRange(table, sizeof(*table))) {
-        USA_LOG_E("Adapter: model table at %s is not mapped, catalogue stays empty",
-                  core::HexPointer(table).c_str());
-        return 0;
-    }
-
     const int limit = ModelScanLimit();
-    int added = 0;
-    int rejected = 0;
-    int firstRejectedIndex = -1;
-    for (int i = kModelScanFirst; i < limit; ++i) {
-        CBaseModelInfo *info = nullptr;
-        // ms_modelInfoPtrs is not dense: slots above the loaded range and slots
-        // reused by the limit adjuster hold plain integers, not pointers.
-        if (!core::IsUsableTableEntry(table, i, info, sizeof(CBaseModelInfo))) {
-            if (firstRejectedIndex < 0)
-                firstRejectedIndex = i;
-            ++rejected;
-            continue;
+    auto lookup = reinterpret_cast<decltype(CModelInfo::GetModelInfo1)>(m_modelByName);
+
+    // Do not call a virtual method through a pointer obtained by sweeping the
+    // numeric slots. Only recognize native static-object vtables (not vehicles,
+    // peds, weapons or unknown pointers in a limit-adjusted table).
+    std::vector<const void *> staticVtables;
+    for (const char *symbol : {"_ZTV16CAtomicModelInfo", "_ZTV22CDamageAtomicModelInfo", "_ZTV14CTimeModelInfo"})
+        if (auto *p = static_cast<uintptr_t *>(Symbol(symbol)))
+            staticVtables.push_back(p + 2); // Itanium ABI address point
+
+    struct {
+        int lookup = 0, slot = 0, type = 0, name = 0, lod = 0, collision = 0, draw = 0;
+    } rejected;
+    auto describe = [&](int id, const CBaseModelInfo *info, const std::string *expected, ModelProto &proto) {
+        if (id < kModelScanFirst || id >= limit || !IsMappedRange(info, sizeof(*info))) {
+            ++rejected.slot;
+            return false;
         }
-        if (!info->m_szModelName[0])
-            continue;
-        if (info->bIsLod)
-            continue;
-        if (CModelInfo::IsVehicleModelType(i))
-            continue;
-
-        const std::string name = LowerCopy(info->m_szModelName);
-        if (name.empty() || name[0] == '#')
-            continue;
-        // Skip pure LOD-ish garbage and dummy entries without any draw distance.
-        if (info->m_fDrawDistance <= 0.0f)
-            continue;
-
-        ModelProto proto;
-        proto.id = i;
+        const void *vtable = nullptr;
+        std::memcpy(&vtable, info, sizeof(vtable));
+        if (std::find(staticVtables.begin(), staticVtables.end(), vtable) == staticVtables.end()) {
+            ++rejected.type;
+            return false;
+        }
+        const auto *terminator = static_cast<const char *>(std::memchr(info->m_szModelName, 0, sizeof(info->m_szModelName)));
+        if (!terminator || terminator == info->m_szModelName || info->m_szModelName[0] == '#' ||
+            (expected && LowerCopy(info->m_szModelName) != LowerCopy(expected->c_str()))) {
+            ++rejected.name;
+            return false;
+        }
+        if (info->bIsLod || LowerCopy(info->m_szModelName).rfind("lod", 0) == 0) {
+            ++rejected.lod;
+            return false;
+        }
+        if (!std::isfinite(info->m_fDrawDistance) || info->m_fDrawDistance <= 0.0f) {
+            ++rejected.draw;
+            return false;
+        }
+        const CColModel *col = info->m_pColModel;
+        if (!IsMappedRange(col, sizeof(*col))) {
+            ++rejected.collision;
+            return false;
+        }
+        const auto half = ToVec3(col->m_boundBox.GetSize() * 0.5f);
+        const auto center = ToVec3(col->m_boundBox.GetCenter());
+        if (!std::isfinite(half.x) || !std::isfinite(half.y) || !std::isfinite(half.z) ||
+            !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
+            half.x <= 0.0f || half.y <= 0.0f || half.z < 0.0f) {
+            ++rejected.collision;
+            return false;
+        }
+        proto.id = id;
         proto.name = info->m_szModelName;
         proto.drawDistance = info->m_fDrawDistance;
-        proto.hasCollision = info->m_pColModel != nullptr;
         proto.isRoad = info->bIsRoad;
-
-        float radius = 1.0f;
-        Vec3f offset;
-        if (info->m_pColModel && core::IsMappedRange(info->m_pColModel, sizeof(CColModel))) {
-            radius = info->m_pColModel->m_boundSphere.m_fRadius;
-            offset = ToVec3(info->m_pColModel->m_boundSphere.m_vecCentre);
+        proto.colHalfExtents = half;
+        proto.colOffset = center;
+        proto.tag = ClassifyByName(LowerCopy(proto.name.c_str()), proto.isRoad, std::max(half.x, half.y));
+        return true;
+    };
+    auto named = [&](const std::string &name, ModelProto &proto) {
+        int id = -1;
+        // CModelInfo::GetModelInfo(const char *, int *), with the export
+        // resolved explicitly rather than calling a possibly null SDK proxy.
+        auto *info = lookup && !name.empty() && name.size() < 21 && name.find('\0') == std::string::npos
+                         ? lookup(name.c_str(), &id) : nullptr;
+        if (!info) {
+            ++rejected.lookup;
+            return false;
         }
-        proto.colHalfExtents = {radius, radius, radius};
-        proto.colOffset = offset;
-        proto.tag = ClassifyByName(name, info->bIsRoad, radius);
+        return describe(id, info, &name, proto);
+    };
 
-        // Buildings that cannot hold a floor are useless for city blocks.
-        if (proto.tag == PropTag::Building && radius < 2.0f)
-            proto.tag = PropTag::Prop;
-        if (proto.tag == PropTag::Unknown)
-            proto.tag = PropTag::Prop;
+    std::vector<ModelProto> models;
+    std::unordered_set<int> ids;
+    auto add = [&](ModelProto &&p) {
+        if (ids.insert(p.id).second)
+            models.push_back(std::move(p));
+    };
+    ModelCatalog db;
+    if (db.LoadFromFile(assetDir + "/objects_db.json")) {
+        for (const auto &entry : db.All()) {
+            ModelProto p;
+            if (entry.isDynamic || !named(entry.name, p))
+                continue;
+            if (entry.tag != PropTag::Unknown)
+                p.tag = entry.tag;
+            p.isRoad = p.isRoad || entry.isRoad;
+            add(std::move(p));
+        }
+    }
+    const size_t dbCount = models.size();
+    int whitelistRoad = -1;
+    std::ifstream whitelist(assetDir + "/model_whitelist.json", std::ios::binary);
+    Json root;
+    const std::string whitelistText((std::istreambuf_iterator<char>(whitelist)), {});
+    const Json *entries = Json::TryParse(whitelistText, root) ? root.Find("models") : nullptr;
+    if (entries && entries->IsArray()) {
+        for (const auto &entry : entries->GetArray()) {
+            ModelProto p;
+            if (!named(entry.GetString("name", ""), p))
+                continue;
+            const auto tag = PropTagFromName(entry.GetString("tag", ""));
+            if (tag != PropTag::Unknown)
+                p.tag = tag;
+            if (whitelistRoad < 0 && p.tag == PropTag::RoadFlat && IsFlatRoadCandidate(p))
+                whitelistRoad = p.id;
+            add(std::move(p));
+        }
+    } else {
+        USA_LOG_W("Adapter: model_whitelist.json missing or invalid");
+    }
+    const size_t whitelistCount = models.size() - dbCount;
 
-        out.Add(proto);
-        ++added;
+    int tableRoad = -1;
+    const bool hasTaggedRoad = std::any_of(models.begin(), models.end(), [](const ModelProto &p) {
+        return (p.tag == PropTag::RoadFlat || p.isRoad) && IsFlatRoadCandidate(p);
+    });
+    // With no usable DB, fill the generation buckets from the numeric fallback.
+    // If named entries lack a road, also keep candidates for the flat-collision fallback.
+    const bool fillNumeric = !dbCount || (whitelistRoad < 0 && !hasTaggedRoad);
+    const bool mappedTable = IsMappedRange(table, sizeof(*table));
+    size_t numericCount = 0;
+    if (mappedTable) {
+        for (int id = kModelScanFirst; id < limit; ++id) {
+            const bool numeric = fillNumeric && id >= 3000 && id <= 18000;
+            if (!numeric && tableRoad >= 0)
+                continue;
+            CBaseModelInfo *info = nullptr;
+            if (!IsUsableTableEntry(table, id, info, sizeof(*info))) {
+                ++rejected.slot;
+                continue;
+            }
+            ModelProto p;
+            if (!describe(id, info, nullptr, p))
+                continue;
+            const bool tablePick = tableRoad < 0 && p.isRoad && IsFlatRoadCandidate(p);
+            if (tablePick)
+                tableRoad = p.id;
+            if (numeric || tablePick) {
+                const size_t before = models.size();
+                add(std::move(p));
+                numericCount += numeric && models.size() != before;
+            }
+        }
     }
 
-    USA_LOG_I("Adapter: live catalogue built, %d models, %d slots rejected (limit %d, first bad index %d)",
-              added, rejected, limit, firstRejectedIndex);
-    return added;
+    out.Clear();
+    out.AddModels(std::move(models));
+    const auto *road = out.PickRoad(tableRoad, whitelistRoad);
+    m_roadModel = road ? road->id : -1;
+    USA_LOG_I("Adapter: catalogue=%zu db=%zu whitelist=%zu numeric=%zu limit=%d road=%d (%s)",
+              out.Size(), dbCount, whitelistCount, numericCount, limit, m_roadModel,
+              !road ? "none" : road->id == tableRoad ? "table" : road->id == whitelistRoad ? "whitelist" :
+              (road->isRoad || road->tag == PropTag::RoadFlat) ? "RoadFlat" : "largest flat collision");
+    if (!out.Size()) {
+        USA_LOG_W("Adapter: rejected lookup=%d slot=%d type=%d name=%d lod=%d collision=%d draw=%d",
+                  rejected.lookup, rejected.slot, rejected.type, rejected.name, rejected.lod, rejected.collision, rejected.draw);
+        for (int i = 0; i < 8; ++i) {
+            const bool readable = mappedTable && IsMappedRange(&table[i], sizeof(table[i]));
+            USA_LOG_W("Adapter: ms_modelInfoPtrs=%s [%d]=%s%s", HexPointer(table).c_str(), i,
+                      HexPointer(readable ? table[i] : nullptr).c_str(), readable ? "" : " (unreadable)");
+        }
+    }
+    return static_cast<int>(out.Size());
 }
 
 } // namespace adapter

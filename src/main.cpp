@@ -24,6 +24,10 @@
 #include "net/cloud_sync.hpp"
 #include "ui/imgui_overlay.hpp"
 
+#include <plugin-sdk/renderware/imgui/imgui_impl_renderware.h>
+
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
@@ -70,7 +74,7 @@ class ModApp {
     std::unique_ptr<net::CloudSync> m_cloud;
     ui::ImGuiOverlay m_overlay;
     TwoFingerSwipeDetector m_gesture;
-    CornerTapDetector m_cornerTap;
+    std::atomic<bool> m_swipePending{false};
 
     ModelCatalog m_catalog;
     ModConfig m_config;
@@ -136,6 +140,15 @@ void ModApp::OnLoad() {
     m_deltaPath = m_modDir + "/world_delta.json";
     m_missionsDir = m_modDir + "/assets/missions";
     logger->Info("mod dir: %s", m_modDir.c_str());
+
+    int screenW = 0, screenH = 0;
+    if (aml)
+        aml->GetDisplaySize(&screenW, &screenH);
+    ImGui_ImplRenderWare_SetScreenSize(screenW, screenH);
+    if (screenW > 0 && screenH > 0)
+        m_gesture.SetScreenSize(static_cast<float>(screenW), static_cast<float>(screenH));
+    else
+        logger->Print(LogP_Warn, "GetDisplaySize returned %dx%d: passing raw touches to ImGui", screenW, screenH);
 
     LoadConfig();
 
@@ -209,7 +222,7 @@ void ModApp::BootRuntime() {
     if (m_delta.hasPlayerPos)
         m_origin.SetOffset(Vec2d(m_delta.playerGlobalX, m_delta.playerGlobalY));
 
-    m_generator = std::make_unique<ChunkGenerator>(m_catalog);
+    m_generator = std::make_unique<ChunkGenerator>(m_catalog, m_config.generationZ);
 
     ChunkStreamer::Config streamCfg;
     streamCfg.chunkSize = m_config.chunkSize;
@@ -221,7 +234,9 @@ void ModApp::BootRuntime() {
 
     m_interiorGen = std::make_unique<InteriorGenerator>(m_catalog);
     m_interiors = std::make_unique<InteriorManager>(m_adapter, *m_interiorGen);
-    m_polygon = std::make_unique<TestPolygon>(m_adapter, m_catalog);
+    TestPolygon::Config polygonCfg;
+    polygonCfg.generationZ = m_config.generationZ;
+    m_polygon = std::make_unique<TestPolygon>(m_adapter, m_catalog, polygonCfg);
     m_streamingEnabled = m_config.streamingEnabled;
 
     if (!m_overlay.Initialize())
@@ -252,8 +267,6 @@ void ModApp::BootRuntime() {
     m_runtimeReady = true;
     logger->Info("USA 1:1 loaded: %zu models, %zu missions, grid %dx%d", m_catalog.Size(), m_missions.Size(),
                  m_config.gridRadius * 2 + 1, m_config.gridRadius * 2 + 1);
-    if (m_config.autoStartPolygon)
-        TogglePolygon();
 }
 
 void ModApp::OnGameCrash(const char *library, int sig, int code, uintptr_t libaddr) {
@@ -295,27 +308,18 @@ void ModApp::LoadConfig() {
 }
 
 void ModApp::LoadCatalogue() {
-    const std::string dbPath = m_modDir + "/assets/objects_db.json";
-    std::string err;
-    if (m_catalog.LoadFromFile(dbPath, &err)) {
-        logger->Info("objects_db.json: %zu models", m_catalog.Size());
-    } else {
-        logger->Info("no objects_db.json (%s), scanning live CModelInfo", err.c_str());
-        m_adapter.BuildLiveCatalog(m_catalog);
-        // Persist what we found so tools/parse_ide.py can enrich it later.
-        if (m_catalog.Size() > 0) {
-            std::error_code ec;
-            std::filesystem::create_directories(m_modDir + "/assets", ec);
-            FILE *f = fopen((m_modDir + "/assets/objects_db_live.json").c_str(), "wb");
-            if (f) {
-                const std::string text = m_catalog.ToJson().Dump(true);
-                fwrite(text.data(), 1, text.size(), f);
-                fclose(f);
-            }
-        }
-    }
-    if (m_catalog.Size() == 0)
+    const std::string assets = m_modDir + "/assets";
+    if (!m_adapter.BuildLiveCatalog(m_catalog, assets)) {
         logger->Print(LogP_Warn, "catalogue is empty: chunks will spawn no props (markers only)");
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(assets, ec);
+    if (FILE *f = fopen((assets + "/objects_db_live.json").c_str(), "wb")) {
+        const std::string text = m_catalog.ToJson().Dump(true);
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+    }
 }
 
 void ModApp::LoadMissions() {
@@ -392,10 +396,15 @@ void ModApp::OnTick(double dt) {
         if (!m_runtimeReady)
             return;
     }
+    if (m_swipePending.exchange(false))
+        m_overlay.Toggle();
     if (!m_adapter.IsGameReady())
         return;
-    if (!m_initialSpawnDone)
+    if (!m_initialSpawnDone) {
         ApplyInitialSpawn();
+        if (m_initialSpawnDone && m_config.autoStartPolygon)
+            TogglePolygon();
+    }
 
     Vec3f local;
     if (!m_adapter.GetPlayerPosition(local))
@@ -426,6 +435,9 @@ void ModApp::OnTick(double dt) {
         if (!shift.invariantHeld)
             logger->Print(LogP_Warn, "floating origin invariant violated");
         m_streamer->OnOriginShift(shift.delta);
+        m_polygon->OnOriginShift(m_origin.Offset());
+        if (!m_adapter.GetPlayerPosition(local))
+            return;
         m_shiftsThisFrame = 1;
         m_deltaDirty = true;
     }
@@ -484,20 +496,14 @@ void ModApp::OnTick(double dt) {
 }
 
 void ModApp::OnTouch(int action, int track, int x, int y) {
-    const double now = m_adapter.NowSeconds();
-
-    // Corner tap first: it is the reliable way in when the game or a vendor
-    // touch layer eats the two-finger swipe before ImGui sees it.
-    if (m_cornerTap.Feed(action, track, x, y, now)) {
-        m_overlay.Toggle();
-        logger->Info("overlay %s (corner tap)", m_overlay.Visible() ? "opened" : "closed");
+    // GTA's AND_TouchEvent uses 1=release, 2=press, 3=move, 4=cancel.
+    // The host-tested gesture detector takes Android MotionEvent codes.
+    constexpr int toAndroid[] = {-1, 1, 0, 2, 3};
+    if (action < 1 || action > 4)
         return;
-    }
-
-    if (m_gesture.Feed(action, track, x, y, now)) {
-        m_overlay.Toggle();
-        logger->Info("overlay %s", m_overlay.Visible() ? "opened" : "closed");
-    }
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (m_gesture.Feed(toAndroid[action], track, x, y, now))
+        m_swipePending.store(true);
 }
 
 void ModApp::UpdateTelemetry() {
@@ -525,7 +531,7 @@ void ModApp::UpdateTelemetry() {
     t.chunkY = chunk.y;
     t.chunkSeed = ChunkSeed(chunk.x, chunk.y);
     t.activeChunks = m_streamer->ActiveChunkCount();
-    t.activeObjects = static_cast<int>(m_streamer->ObjectCount());
+    t.activeObjects = static_cast<int>(m_streamer->ObjectCount() + m_polygon->TileCount());
     t.streamedEntities = m_adapter.CountStreamedEntities();
     t.playerInterior = m_interiors->CurrentArea();
 
@@ -623,6 +629,8 @@ void ModApp::TogglePolygon() {
         m_adapter.ShowToast("Test polygon OFF");
         return;
     }
+    if (m_interiors->IsInside())
+        m_interiors->Exit(m_delta);
     Vec3f local;
     if (!m_adapter.GetPlayerPosition(local))
         return;

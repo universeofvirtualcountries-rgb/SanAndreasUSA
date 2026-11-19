@@ -22,7 +22,7 @@ SOURCES=(
   src/core/model_catalog.cpp src/core/chunk_generator.cpp src/core/chunk_streamer.cpp
   src/core/floating_origin.cpp src/core/interior.cpp src/core/world_delta.cpp
   src/core/mission.cpp src/core/test_polygon.cpp src/core/touch_gesture.cpp
-  src/core/config.cpp src/net/cloud_sync.cpp
+  src/core/config.cpp src/core/status_feed.cpp src/net/cloud_sync.cpp src/ui/imgui_overlay.cpp
   mod/logger.cpp mod/config.cpp
   mod/thirdparty/imgui/imgui.cpp mod/thirdparty/imgui/imgui_draw.cpp
   mod/thirdparty/imgui/imgui_tables.cpp mod/thirdparty/imgui/imgui_widgets.cpp
@@ -31,7 +31,9 @@ SOURCES=(
 )
 
 TARGETS=("aarch64-linux-musl" "arm-linux-musleabihf")
-FLAGS=(-std=c++17 -c -o /tmp/usa1to1_check.o -D__ANDROID__ -DNDEBUG -O2
+workdir=$(mktemp -d) || exit 2
+trap 'rm -rf "$workdir"' EXIT
+FLAGS=(-std=c++17 -c -o "$workdir/check.o" -DUSA1TO1_ARM_COMPILE_CHECK -DNDEBUG -O2
        -fexceptions -frtti -fvisibility=hidden -fvisibility-inlines-hidden
        -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable
        -Wno-missing-field-initializers -Wno-unknown-warning-option
@@ -51,9 +53,9 @@ for target in "${TARGETS[@]}"; do
         arch_flags+=(-mfloat-abi=softfp)
     fi
     for src in "${SOURCES[@]}"; do
-        if ! "$ZIG_BIN" "${CACHE_ARGS[@]}" c++ -target "$target" "${FLAGS[@]}" "${arch_flags[@]}" "$src" 2>/tmp/usa1to1_cc.log; then
+        if ! "$ZIG_BIN" "${CACHE_ARGS[@]}" c++ -target "$target" "${FLAGS[@]}" "${arch_flags[@]}" "$src" 2>"$workdir/check.log"; then
             echo "FAIL $target $src"
-            head -20 /tmp/usa1to1_cc.log
+            head -20 "$workdir/check.log"
             status=1
         fi
     done

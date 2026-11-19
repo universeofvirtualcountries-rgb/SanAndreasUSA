@@ -93,7 +93,10 @@ else()
     )
     target_compile_options(usa1to1_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
-    add_executable(usa1to1_tests tests/test_main.cpp)
+    add_executable(usa1to1_tests
+        tests/test_main.cpp
+        plugin-sdk/renderware/imgui/imgui_shared.cpp
+    )
     target_link_libraries(usa1to1_tests PRIVATE usa1to1_core)
     target_include_directories(usa1to1_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/tests

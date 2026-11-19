@@ -27,8 +27,8 @@ git push
 
 After that, every push and pull request runs:
 
-1. `host-tests` — cmake build + `usa1to1_tests` (38 cases) + `parse_ide.py --self-test`
-   + JSON validation;
+1. `host-tests` — CMake/CTest, `parse_ide.py --self-test`, source-list checks,
+   JSON validation and Zig compile checks for both ARM ABIs;
 2. `android` (matrix) — NDK r27d, `arm64-v8a` and `armeabi-v7a`, `android-24`,
    `c++_static`, exports `libUSA1to1.so` and checks the symbol table;
 3. `package` — merges both ABIs into **`USA1to1-full` → `USA1to1.zip`** containing

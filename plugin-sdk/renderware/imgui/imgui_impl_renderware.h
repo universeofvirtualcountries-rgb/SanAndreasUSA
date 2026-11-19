@@ -1,5 +1,8 @@
 #pragma once
 
+#include "imgui_shared.h"
+
+#include <cstddef>
 #include <mod/thirdparty/imgui/imgui.h>
 
 // Called every rendered frame between ImGui::NewFrame() and ImGui::Render().
@@ -17,3 +20,8 @@ void ImGui_ImplRenderWare_Shutdown();
 // Low-level renderer APIs (for developers who manage their own ImGui context and frame loop)
 bool ImGui_ImplRenderWare_InitRenderer();
 bool ImGui_ImplRenderWare_RenderDrawData(ImDrawData *drawData);
+
+// Cache physical display dimensions during AML's loader stage, before installing hooks.
+void ImGui_ImplRenderWare_SetScreenSize(int width, int height);
+ImGuiShared::TouchSample ImGui_ImplRenderWare_LastTouch();
+void ImGui_ImplRenderWare_FormatTouch(const ImGuiShared::TouchSample &sample, char *out, size_t size);
