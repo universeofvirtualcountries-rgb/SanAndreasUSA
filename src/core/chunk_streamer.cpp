@@ -191,6 +191,11 @@ bool ChunkStreamer::SpawnPendingProps(ActiveChunk &chunk, const Vec2d &origin, i
         if (obj.handle) {
             chunk.objects.push_back(obj);
             spawnedAny = true;
+        } else if (!m_bridge.IsModelLoaded(it->modelId) && now - chunk.requestedAt < 10.0) {
+            // A model can lose its live resources during creation. Leave it
+            // queued and let the regular readiness check retry on a later tick.
+            ++it;
+            continue;
         } else {
             ++m_spawnFailed;
             m_statsDirty = true;

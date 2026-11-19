@@ -19,6 +19,9 @@
 #include <string>
 #include <unordered_map>
 
+struct CBaseModelInfo;
+struct CObject;
+
 namespace usa1to1 {
 namespace adapter {
 
@@ -113,7 +116,6 @@ class GTASAAdapter final : public core::IEngineBridge {
 
   private:
     struct OwnedObject {
-        uintptr_t pointer = 0;
         int modelId = -1;
         bool interior = false;
         core::Vec3f pos;
@@ -152,7 +154,11 @@ class GTASAAdapter final : public core::IEngineBridge {
     void InstallHooks();
     void RemoveHooks();
     int MovePoolEntities(bool peds, bool vehicles, const core::Vec3f &delta, bool includeInterior);
-    bool SafeTeleport(uintptr_t entityPtr, const core::Vec3f &pos);
+    CBaseModelInfo **LiveModelTable() const;
+    const CBaseModelInfo *LiveModelInfo(int modelId) const;
+    bool MoveWorldObject(CObject *obj, int modelId, const core::Vec3f &pos);
+    void LogUnreadyModel(int modelId, const char *reason);
+    void DeletePoolObject(CObject *obj, bool inWorld);
     std::string DetectVersion();
 
     void *m_libHandle = nullptr;
@@ -171,6 +177,8 @@ class GTASAAdapter final : public core::IEngineBridge {
 
     int m_modelIdLimit = 20000;
     void *m_modelByName = nullptr;
+    CBaseModelInfo **m_exportedModelTable = nullptr;
+    std::unordered_map<int, double> m_nextUnreadyLog;
     int m_roadModel = -1;
     int m_interiorArea = 0;
     uint64_t m_nextMarkerEngineId = 0x55000000ULL;

@@ -105,6 +105,7 @@ class InteriorManager {
 
   private:
     void Teardown();
+    void SpawnPendingProps();
 
     IEngineBridge &m_bridge;
     const InteriorGenerator &m_generator;
@@ -112,6 +113,8 @@ class InteriorManager {
     InteriorLayout m_current;
     std::vector<ObjectHandle> m_objects;
     std::vector<int> m_models;
+    std::vector<size_t> m_pendingProps;
+    double m_spawnDeadline = 0.0;
     uint64_t m_exitMarkerId = 0;
     Vec3f m_returnPos;
     int64_t m_lastReward = 0;

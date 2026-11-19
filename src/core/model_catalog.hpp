@@ -41,7 +41,7 @@ struct ModelProto {
     float drawDistance = 200.0f;
     bool isRoad = false;   // CBaseModelInfo::bIsRoad
     bool hasCollision = true;
-    bool isDynamic = false; // vehicles / peds, never used for static chunks
+    bool isDynamic = false; // dynamic model / object.dat props; excluded from road plates
 };
 
 // A road must support a player, not just have a large bounding sphere.

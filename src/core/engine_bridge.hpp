@@ -80,6 +80,7 @@ class IEngineBridge {
 
     // --- streaming -----------------------------------------------------------
     virtual bool RequestModel(int modelId, bool dynamic) = 0;
+    // True when streaming and the live render/collision resources are ready for spawning.
     virtual bool IsModelLoaded(int modelId) = 0;
     virtual void ReleaseModel(int modelId) = 0;
     // Blocking "load everything requested now". Only used at loading moments

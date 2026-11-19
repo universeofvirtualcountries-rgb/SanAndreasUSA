@@ -264,29 +264,21 @@ bool InteriorManager::Enter(uint64_t doorSeed, const Vec3f &doorLocalPos, WorldD
     for (int modelId : m_current.requiredModels) {
         if (modelId < 0)
             continue;
-        m_bridge.RequestModel(modelId, false);
-        m_models.push_back(modelId);
+        if (m_bridge.RequestModel(modelId, false))
+            m_models.push_back(modelId);
     }
 
-    // A door transition is a loading moment: request everything, flush once,
-    // then spawn. Chunk streaming never blocks like this.
-    m_bridge.FlushModelStreaming();
-
-    for (const auto &prop : m_current.props) {
-        if (!m_bridge.IsModelLoaded(prop.modelId))
-            continue; // pockets are small; a couple of missing props is fine
-        SpawnParams params;
-        params.modelId = prop.modelId;
-        params.pos = prop.localPos;
-        params.headingRad = prop.headingRad;
-        params.dynamic = false;
-        params.interior = true;
-        params.collision = true;
-        params.ownerTag = doorSeed;
-        const ObjectHandle h = m_bridge.CreateObject(params);
-        if (h)
-            m_objects.push_back(h);
+    // One blocking flush during this transition; anything still unready waits
+    // for later ticks, never a synchronous retry loop.
+    if (!m_models.empty())
+        m_bridge.FlushModelStreaming();
+    for (size_t i = 0; i < m_current.props.size(); ++i) {
+        const int modelId = m_current.props[i].modelId;
+        if (std::find(m_models.begin(), m_models.end(), modelId) != m_models.end())
+            m_pendingProps.push_back(i);
     }
+    m_spawnDeadline = m_bridge.NowSeconds() + 10.0;
+    SpawnPendingProps();
 
     m_returnPos = doorLocalPos;
     m_exitMarkerId = MarkerIdFromDoorSeed(doorSeed) ^ 0x5A5A5A5AULL;
@@ -302,6 +294,29 @@ bool InteriorManager::Enter(uint64_t doorSeed, const Vec3f &doorLocalPos, WorldD
     USA_LOG_I("Interior: entered door %llu -> area %d, %zu rooms, %zu props",
               static_cast<unsigned long long>(doorSeed), areaId, m_current.RoomCount(), m_objects.size());
     return true;
+}
+
+void InteriorManager::SpawnPendingProps() {
+    if (!m_pendingProps.empty() && m_bridge.NowSeconds() >= m_spawnDeadline) {
+        USA_LOG_W("Interior: gave up waiting for %zu pending props", m_pendingProps.size());
+        m_pendingProps.clear();
+    }
+    for (auto it = m_pendingProps.begin(); it != m_pendingProps.end();) {
+        const auto &prop = m_current.props[*it];
+        if (!m_bridge.IsModelLoaded(prop.modelId)) {
+            ++it;
+            continue;
+        }
+        const SpawnParams params{prop.modelId, prop.localPos, prop.headingRad, false, true, true, m_current.doorSeed};
+        const ObjectHandle handle = m_bridge.CreateObject(params);
+        if (handle) {
+            m_objects.push_back(handle);
+        } else if (!m_bridge.IsModelLoaded(prop.modelId)) {
+            ++it;
+            continue;
+        }
+        it = m_pendingProps.erase(it);
+    }
 }
 
 void InteriorManager::Exit(WorldDelta &delta) {
@@ -321,6 +336,7 @@ void InteriorManager::Teardown() {
     for (int modelId : m_models)
         m_bridge.ReleaseModel(modelId);
     m_models.clear();
+    m_pendingProps.clear();
     if (m_exitMarkerId) {
         m_bridge.RemoveMarker(m_exitMarkerId);
         m_exitMarkerId = 0;
@@ -342,6 +358,8 @@ InteriorManager::Event InteriorManager::Update(const Vec3f &localPlayer, WorldDe
         Exit(delta);
         return Event::Exited;
     }
+
+    SpawnPendingProps();
 
     // 2) Cash register: walk into it and the till is yours - once per door,
     //    forever, because the delta save remembers it.
