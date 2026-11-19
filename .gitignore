@@ -1,0 +1,36 @@
+# Build trees
+build/
+build-*/
+out/
+cmake-build-*/
+.cxx/
+
+# Compiler / tool artefacts
+*.o
+*.a
+*.so.dbg
+*.obj
+*.pdb
+.zig-cache/
+zig-out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local game data / generated catalogues (never commit the user's game files)
+objects_db.json
+!assets/objects_db.sample.json
+world_delta.json
+cloud_state.json
+config.json
+*.tmp
+*.download

@@ -1,0 +1,73 @@
+{
+  "_comment": [
+    "This is an EXAMPLE of the schema produced by tools/parse_ide.py.",
+    "Do not copy this file to assets/objects_db.json: the ids below are placeholders",
+    "and would spawn the wrong props. Run the tool against your own game files:",
+    "  python3 tools/parse_ide.py --game /path/to/GTA_SA --out assets/objects_db.json",
+    "When objects_db.json is absent the mod scans CModelInfo at runtime instead."
+  ],
+  "version": 1,
+  "source": "example",
+  "models": [
+    {
+      "id": 1234,
+      "name": "example_building",
+      "tag": "building",
+      "col": { "half": [8.0, 6.0, 11.0], "offset": [0.0, 0.0, 11.0] },
+      "draw_distance": 299.0,
+      "road": false,
+      "has_collision": true,
+      "dynamic": false
+    },
+    {
+      "id": 1235,
+      "name": "example_tree",
+      "tag": "tree",
+      "col": { "half": [1.6, 1.6, 4.0], "offset": [0.0, 0.0, 4.0] },
+      "draw_distance": 150.0,
+      "road": false,
+      "has_collision": true,
+      "dynamic": false
+    },
+    {
+      "id": 1236,
+      "name": "example_road_tile",
+      "tag": "road_flat",
+      "col": { "half": [10.0, 10.0, 0.2], "offset": [0.0, 0.0, 0.0] },
+      "draw_distance": 250.0,
+      "road": true,
+      "has_collision": true,
+      "dynamic": false
+    },
+    {
+      "id": 1237,
+      "name": "example_wall",
+      "tag": "wall",
+      "col": { "half": [1.5, 0.2, 1.5], "offset": [0.0, 0.0, 1.5] },
+      "draw_distance": 120.0,
+      "road": false,
+      "has_collision": true,
+      "dynamic": false
+    },
+    {
+      "id": 1238,
+      "name": "example_floor",
+      "tag": "floor",
+      "col": { "half": [3.0, 3.0, 0.1], "offset": [0.0, 0.0, 0.0] },
+      "draw_distance": 120.0,
+      "road": false,
+      "has_collision": true,
+      "dynamic": false
+    },
+    {
+      "id": 1239,
+      "name": "example_counter",
+      "tag": "furniture",
+      "col": { "half": [1.2, 0.6, 0.5], "offset": [0.0, 0.0, 0.5] },
+      "draw_distance": 120.0,
+      "road": false,
+      "has_collision": true,
+      "dynamic": false
+    }
+  ]
+}

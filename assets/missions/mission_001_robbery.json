@@ -1,0 +1,29 @@
+{
+  "id": "mission_001_robbery",
+  "title": "First Score",
+  "giver": "Eddie 'Cash' Moreno",
+  "region": "CA",
+  "brief": "Grab the take from any corner store register in Los Santos county, then get back to the meeting point before the heat rolls in.",
+  "start": { "x": 580347.6, "y": 1063350.9 },
+  "reward": 2500,
+  "steps": [
+    {
+      "type": "goto",
+      "text": "Reach the marked corner store",
+      "target": { "x": 580347.6, "y": 1063350.9 },
+      "radius": 12.0
+    },
+    {
+      "type": "rob_door",
+      "text": "Walk into any shop and empty the cash register",
+      "door_seed": 0,
+      "payout": 0
+    },
+    {
+      "type": "goto",
+      "text": "Bring the cash back to the meeting point",
+      "target": { "x": 580520.0, "y": 1063700.0 },
+      "radius": 10.0
+    }
+  ]
+}

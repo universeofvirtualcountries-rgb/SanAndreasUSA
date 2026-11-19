@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "game": "gtasa-android",
+  "mod": "USA1to1",
+  "missions": [
+    {
+      "id": "mission_001_robbery",
+      "file": "missions/mission_001_robbery.json",
+      "url": "https://raw.githubusercontent.com/universeofvirtualcountries-rgb/SanAndreasUSA/main/assets/missions/mission_001_robbery.json",
+      "version": 1,
+      "size": 797,
+      "hash": "ccbfed6fc3f77587"
+    },
+    {
+      "id": "mission_002_presidential_hit",
+      "file": "missions/mission_002_presidential_hit.json",
+      "url": "https://raw.githubusercontent.com/universeofvirtualcountries-rgb/SanAndreasUSA/main/assets/missions/mission_002_presidential_hit.json",
+      "version": 1,
+      "size": 1091,
+      "hash": "a67fb8d75d928256"
+    }
+  ]
+}
