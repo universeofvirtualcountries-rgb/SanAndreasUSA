@@ -11,6 +11,7 @@ LOCAL_SRC_FILES := \
     src/main.cpp \
     src/adapter/gtasa_adapter.cpp \
     src/net/android_http.cpp \
+    src/ui/imgui_overlay.cpp \
     src/core/hash.cpp \
     src/core/json.cpp \
     src/core/regions.cpp \

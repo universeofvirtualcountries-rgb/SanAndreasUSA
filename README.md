@@ -25,7 +25,7 @@ interiors and JSON missions while the engine only ever sees ±1000 m of local sp
 | Cloud | `src/net/cloud_sync.*` + `src/net/android_http.*` — `java.net.HttpURLConnection` over JNI, manifest + hash verification, background thread |
 | UI | `src/ui/imgui_overlay.*` — Dear ImGui through AML's RenderWare backend, opened by a two-finger swipe down |
 | Engine bridge | `src/adapter/gtasa_adapter.*` — the only file that touches `libGTASA.so` |
-| Tools | `tools/parse_ide.py` (.ide/.col → `objects_db.json`), `tools/arm_compile_check.sh` |
+| Tools | `tools/parse_ide.py` (.ide/.col → `objects_db.json`), `tools/arm_compile_check.sh`, `tools/check_source_lists.py` (every .cpp must be in CMakeLists + Android.mk) |
 | CI | `ci/build_android.yml` — host tests, both ABIs (NDK r27d), packaged `USA1to1.zip` |
 
 ---

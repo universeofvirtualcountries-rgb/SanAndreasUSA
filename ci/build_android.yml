@@ -36,6 +36,11 @@ jobs:
           python3 -m py_compile tools/parse_ide.py
           python3 tools/parse_ide.py --self-test
 
+      # Catches the classic "compiles in isolation, never linked" bug: a new
+      # .cpp that is missing from CMakeLists.txt or Android.mk.
+      - name: Validate build source lists
+        run: python3 tools/check_source_lists.py --verbose
+
       - name: Validate JSON assets
         run: |
           for f in assets/manifest.json assets/objects_db.sample.json assets/missions/*.json; do
