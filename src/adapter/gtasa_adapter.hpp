@@ -45,6 +45,10 @@ class GTASAAdapter final : public core::IEngineBridge {
     // the gate for the runtime stage: before it, model info is still loading.
     bool IsEngineLoaded();
     void SetModDirectoryOverride(const std::string &dir) { m_modDirOverride = dir; }
+    // Real size of the model table for this installation (20000 on stock 2.00,
+    // larger with Fastman92). Everything above it is never scanned.
+    void SetModelIdLimit(int limit);
+    int ModelScanLimit() const;
     const std::string &LastError() const { return m_lastError; }
     // "6/12 engine symbols" style summary for the log/telemetry.
     std::string SymbolSummary() const;
@@ -160,6 +164,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     double m_now = 0.0;
     float m_fps = 0.0f;
 
+    int m_modelIdLimit = 20000;
     int m_roadModel = -2; // -2 = not probed yet, -1 = nothing found
     int m_interiorArea = 0;
     uint64_t m_nextMarkerEngineId = 0x55000000ULL;

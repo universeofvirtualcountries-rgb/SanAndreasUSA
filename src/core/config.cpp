@@ -34,6 +34,7 @@ Json ModConfig::ToJson() const {
     content.Set("teleport_on_first_load", teleportOnFirstLoad);
     content.Set("door_trigger_radius", static_cast<double>(doorTriggerRadius));
     content.Set("starting_money", startingMoney);
+    content.Set("model_id_limit", modelIdLimit);
     root.Set("content", content);
 
     Json cloud = Json::Object();
@@ -72,6 +73,7 @@ bool ModConfig::FromJson(const Json &root, std::string *error) {
             teleportOnFirstLoad = c->GetBool("teleport_on_first_load", teleportOnFirstLoad);
             doorTriggerRadius = static_cast<float>(c->GetDouble("door_trigger_radius", doorTriggerRadius));
             startingMoney = c->GetInt("starting_money", startingMoney);
+            modelIdLimit = static_cast<int>(c->GetInt("model_id_limit", modelIdLimit));
         }
         if (const Json *cl = root.Find("cloud_sync")) {
             cloudSyncEnabled = cl->GetBool("enabled", cloudSyncEnabled);
@@ -97,6 +99,8 @@ bool ModConfig::FromJson(const Json &root, std::string *error) {
             chunkSize = 200.0;
         if (localLimit > 1000.0 || localLimit < 400.0)
             localLimit = 1000.0;
+        if (modelIdLimit < 400 || modelIdLimit > 26316)
+            modelIdLimit = modelIdLimit < 400 ? 400 : 26316;
         return true;
     } catch (const std::exception &e) {
         if (error)

@@ -40,7 +40,9 @@ namespace usa1to1 {
 namespace adapter {
 namespace {
 
-constexpr int kMaxModelIds = 26316;   // hard limit of the mobile streaming arrays
+constexpr int kMaxModelIds = 26316;      // hard ceiling of the mobile streaming arrays
+constexpr int kModelScanFirst = 400;     // ids below this are engine-reserved
+constexpr int kDefaultModelIdLimit = 20000; // stock GTA SA 2.00 model table size
 constexpr int kMarkerSlots = 12;      // keep well under the engine marker array size
 constexpr u16 kMarkerType = MARKER3D_CYLINDER;
 constexpr uint64_t kMarkerEngineBase = 0x5A000000ULL;
@@ -138,6 +140,21 @@ std::string GTASAAdapter::SymbolSummary() const {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%d/%d engine symbols", m_syms.Present(), m_syms.Total());
     return std::string(buf);
+}
+
+void GTASAAdapter::SetModelIdLimit(int limit) {
+    if (limit < kModelScanFirst || limit > kMaxModelIds) {
+        USA_LOG_W("Adapter: model id limit %d out of range, using %d", limit, kDefaultModelIdLimit);
+        m_modelIdLimit = kDefaultModelIdLimit;
+        return;
+    }
+    m_modelIdLimit = limit;
+}
+
+int GTASAAdapter::ModelScanLimit() const {
+    if (m_modelIdLimit < kModelScanFirst || m_modelIdLimit > kMaxModelIds)
+        return kDefaultModelIdLimit;
+    return m_modelIdLimit;
 }
 
 bool GTASAAdapter::VerifyEngineSymbols() {
@@ -578,6 +595,8 @@ bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
         return false;
     if (!CStreaming::IsInitialised())
         return false;
+    if (!core::IsMappedRange(&CStreaming::ms_aInfoForModel[modelId], sizeof(CStreamingInfo)))
+        return false;
     CStreaming::RequestModel(modelId, 0);
     return true;
 }
@@ -589,7 +608,12 @@ bool GTASAAdapter::IsModelLoaded(int modelId) {
         return false;
     if (!CStreaming::IsInitialised())
         return false;
-    return CStreaming::ms_aInfoForModel[modelId].m_status == 1;
+    // ms_aInfoForModel is a fixed-address global; validate the slot before the
+    // read so a wrong game build disables streaming instead of faulting.
+    CStreamingInfo *entry = &CStreaming::ms_aInfoForModel[modelId];
+    if (!core::IsMappedRange(entry, sizeof(CStreamingInfo)))
+        return false;
+    return entry->m_status == 1;
 }
 
 void GTASAAdapter::ReleaseModel(int modelId) {
@@ -875,15 +899,29 @@ int GTASAAdapter::ProbeRoadModel() {
         return m_roadModel;
     m_roadModel = -1;
 
-    if (!CModelInfo::ms_modelInfoPtrs) {
+    CBaseModelInfo **table = CModelInfo::ms_modelInfoPtrs;
+    if (!table) {
         USA_LOG_W("Adapter: CModelInfo not resolved, road model unknown");
         return m_roadModel;
     }
+    if (!core::IsMappedRange(table, sizeof(*table))) {
+        USA_LOG_E("Adapter: CModelInfo table at %s is not mapped, road model unknown",
+                  core::HexPointer(table).c_str());
+        return m_roadModel;
+    }
+
+    const int limit = ModelScanLimit();
+    int rejectedFirstPass = 0;
+    int rejectedSecondPass = 0;
 
     // 1) Trust the game's own road flag on atomic models.
-    for (int i = 612; i < kMaxModelIds; ++i) {
-        CBaseModelInfo *info = CModelInfo::ms_modelInfoPtrs[i];
-        if (!info || !info->m_szModelName[0])
+    for (int i = kModelScanFirst + 212 /* 612 */; i < limit; ++i) {
+        CBaseModelInfo *info = nullptr;
+        if (!core::IsUsableTableEntry(table, i, info, sizeof(CBaseModelInfo))) {
+            ++rejectedFirstPass;
+            continue;
+        }
+        if (!info->m_szModelName[0])
             continue;
         if (info->bIsLod || !info->m_pColModel)
             continue;
@@ -899,9 +937,13 @@ int GTASAAdapter::ProbeRoadModel() {
     }
 
     // 2) Fall back to name heuristics among flat, collidable atomics.
-    for (int i = 612; i < kMaxModelIds; ++i) {
-        CBaseModelInfo *info = CModelInfo::ms_modelInfoPtrs[i];
-        if (!info || !info->m_szModelName[0] || info->bIsLod || !info->m_pColModel)
+    for (int i = kModelScanFirst + 212 /* 612 */; i < limit; ++i) {
+        CBaseModelInfo *info = nullptr;
+        if (!core::IsUsableTableEntry(table, i, info, sizeof(CBaseModelInfo))) {
+            ++rejectedSecondPass;
+            continue;
+        }
+        if (!info->m_szModelName[0] || info->bIsLod || !info->m_pColModel)
             continue;
         if (CModelInfo::IsVehicleModelType(i))
             continue;
@@ -914,6 +956,9 @@ int GTASAAdapter::ProbeRoadModel() {
         return m_roadModel;
     }
 
+    if (rejectedFirstPass + rejectedSecondPass > 0)
+        USA_LOG_W("Adapter: road probe skipped %d unmapped model slots (limit %d)",
+                  rejectedFirstPass + rejectedSecondPass, limit);
     USA_LOG_W("Adapter: no road model found; test polygon will be marker-only");
     return m_roadModel;
 }
@@ -934,15 +979,32 @@ int GTASAAdapter::CountStreamedEntities() {
 // ---------------------------------------------------------------------------
 
 int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out) {
-    if (!CModelInfo::ms_modelInfoPtrs) {
+    CBaseModelInfo **table = CModelInfo::ms_modelInfoPtrs;
+    if (!table) {
         USA_LOG_W("Adapter: cannot scan models, CModelInfo unavailable");
         return 0;
     }
+    if (!core::IsMappedRange(table, sizeof(*table))) {
+        USA_LOG_E("Adapter: model table at %s is not mapped, catalogue stays empty",
+                  core::HexPointer(table).c_str());
+        return 0;
+    }
 
+    const int limit = ModelScanLimit();
     int added = 0;
-    for (int i = 400; i < kMaxModelIds; ++i) {
-        CBaseModelInfo *info = CModelInfo::ms_modelInfoPtrs[i];
-        if (!info || !info->m_szModelName[0])
+    int rejected = 0;
+    int firstRejectedIndex = -1;
+    for (int i = kModelScanFirst; i < limit; ++i) {
+        CBaseModelInfo *info = nullptr;
+        // ms_modelInfoPtrs is not dense: slots above the loaded range and slots
+        // reused by the limit adjuster hold plain integers, not pointers.
+        if (!core::IsUsableTableEntry(table, i, info, sizeof(CBaseModelInfo))) {
+            if (firstRejectedIndex < 0)
+                firstRejectedIndex = i;
+            ++rejected;
+            continue;
+        }
+        if (!info->m_szModelName[0])
             continue;
         if (info->bIsLod)
             continue;
@@ -965,7 +1027,7 @@ int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out) {
 
         float radius = 1.0f;
         Vec3f offset;
-        if (info->m_pColModel) {
+        if (info->m_pColModel && core::IsMappedRange(info->m_pColModel, sizeof(CColModel))) {
             radius = info->m_pColModel->m_boundSphere.m_fRadius;
             offset = ToVec3(info->m_pColModel->m_boundSphere.m_vecCentre);
         }
@@ -983,7 +1045,8 @@ int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out) {
         ++added;
     }
 
-    USA_LOG_I("Adapter: live catalogue built, %d models", added);
+    USA_LOG_I("Adapter: live catalogue built, %d models, %d slots rejected (limit %d, first bad index %d)",
+              added, rejected, limit, firstRejectedIndex);
     return added;
 }
 

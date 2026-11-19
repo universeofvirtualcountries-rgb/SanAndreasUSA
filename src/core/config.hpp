@@ -29,6 +29,10 @@ struct ModConfig {
     bool teleportOnFirstLoad = true;
     float doorTriggerRadius = 1.6f;
     int64_t startingMoney = 0;
+    // How many entries of CModelInfo::ms_modelInfoPtrs we are allowed to touch.
+    // GTA SA 2.00 fills 20000; Fastman92's limit adjuster can raise it, so the
+    // value is configurable up to the hard ceiling of the mobile arrays.
+    int modelIdLimit = 20000;
 
     // Cloud sync
     bool cloudSyncEnabled = true;

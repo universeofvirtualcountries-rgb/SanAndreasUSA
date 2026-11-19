@@ -93,6 +93,10 @@ full mission re-sync.
   `Overlay: ImGui RenderWare backend failed to initialise`; the mod keeps running
   headless and streaming still works.
 * **Nothing spawns** — the catalogue is empty: see section 5. Markers still appear.
+  Check the log for `live catalogue built, N models, K slots rejected`: `K > 0`
+  with `N == 0` means the model table on this build is not where the ids live -
+  raise or lower `content.model_id_limit` in `config.json` (default 20000, stock
+  2.00 size; Fastman92 users can go up to 26316).
 * **Game stutters when moving fast** — lower `streaming.max_chunks_per_update` /
   `max_spawns_per_update` in `config.json`.
 * **Wrong props in buildings** — your `objects_db.json` came from another game/mod;

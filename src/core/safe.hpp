@@ -112,6 +112,23 @@ inline std::string SanePathOr(const char *p, const char *fallback) {
 // the Thumb bit being irrelevant, so anything below the user range is dropped.
 inline bool IsSaneHandle(const void *p) { return IsMappedRange(p, 1); }
 
+// A table entry is only usable when the slot itself is mapped and the pointer
+// it holds points at a whole `structSize`-byte object. This is what stops the
+// device crash where CModelInfo::ms_modelInfoPtrs[i] held the integer 10184 and
+// `info->m_szModelName[0]` faulted at 10184 + 8.
+template <class T> inline bool IsUsableTableEntry(T *const *table, int index, T *&out, size_t structSize) {
+    out = nullptr;
+    if (!table || index < 0)
+        return false;
+    if (!IsMappedRange(&table[index], sizeof(table[index])))
+        return false;
+    T *entry = table[index];
+    if (!IsMappedRange(entry, structSize))
+        return false;
+    out = entry;
+    return true;
+}
+
 inline std::string HexPointer(const void *p) {
     char buf[2 + 2 * sizeof(uintptr_t)] = {0};
     std::snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(p)));
