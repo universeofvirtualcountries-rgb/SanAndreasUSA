@@ -11,6 +11,7 @@
 #include "core/interior.hpp"
 #include "core/json.hpp"
 #include "core/log.hpp"
+#include "core/safe.hpp"
 #include "core/mission.hpp"
 #include "core/model_catalog.hpp"
 #include "core/regions.hpp"
@@ -1063,6 +1064,38 @@ TEST(catalogue_parses_sample_and_filters) {
 // ---------------------------------------------------------------------------
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// safe.hpp: the AML/JNI trust boundary
+// ---------------------------------------------------------------------------
+TEST(safe_pointers_reject_null_and_small_values) {
+    CHECK(!core::IsSanePointer(nullptr));
+    CHECK(!core::IsSanePointer(reinterpret_cast<const void *>(0x7)));
+    CHECK(!core::IsSanePointer(reinterpret_cast<const void *>(0x1)));
+    CHECK(!core::IsSanePointer(reinterpret_cast<const void *>(core::kMinSanePointer - 1)));
+    int local = 0;
+    CHECK(core::IsSanePointer(&local));
+    CHECK(core::IsMappedRange(&local, sizeof(local)));
+    CHECK(!core::IsMappedRange(nullptr, 4));
+    CHECK(!core::IsMappedRange(reinterpret_cast<const void *>(0x7), 1));
+    CHECK(!core::IsMappedRange(&local, 0));
+    // A huge unmapped address must be rejected, not probed into a fault.
+    CHECK(!core::IsMappedRange(reinterpret_cast<const void *>(0x7FFFFFF0u), 16));
+}
+
+TEST(safe_pointers_validate_strings_and_paths) {
+    const char *good = "/sdcard/AMLMods/com.rockstargames.gtasa/USA1to1";
+    CHECK(core::IsReadableCString(good));
+    CHECK(core::IsSanePath(good));
+    CHECK(!core::IsSanePath("relative/path"));
+    CHECK(!core::IsSanePath(""));
+    CHECK(!core::IsSanePath(reinterpret_cast<const char *>(0x7))); // the value that crashed on device
+    CHECK(!core::IsReadableCString(reinterpret_cast<const char *>(0x7)));
+    CHECK(core::SanePathOr(reinterpret_cast<const char *>(0x7), "/fallback") == "/fallback");
+    CHECK(core::SanePathOr(good, "/fallback") == std::string(good));
+    CHECK(core::SanePathOr(nullptr, nullptr).empty());
+    CHECK(core::HexPointer(reinterpret_cast<const void *>(0x7)) == "0x7");
+}
 
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);

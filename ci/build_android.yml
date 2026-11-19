@@ -106,8 +106,15 @@ jobs:
 
       - name: Stage artifact
         run: |
-          mkdir -p artifact/lib/${{ matrix.abi }}
+          mkdir -p artifact/lib/${{ matrix.abi }} artifact/symbols
           cp build-${{ matrix.abi }}/libUSA1to1.so artifact/lib/${{ matrix.abi }}/
+          # Crash reports reference offsets inside libUSA1to1.so: ship the linker
+          # map plus a sorted symbol table so any stack trace can be resolved
+          # without rebuilding (see docs/ADAPTER.md).
+          cp build-${{ matrix.abi }}/USA1to1.map artifact/symbols/${{ matrix.abi }}-USA1to1.map || true
+          "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+            -C --defined-only --numeric-sort build-${{ matrix.abi }}/libUSA1to1.so \
+            > artifact/symbols/${{ matrix.abi }}-symbols.txt || true
           cp -r assets artifact/
           cp README.md artifact/ || true
 

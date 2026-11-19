@@ -5,6 +5,38 @@ The adapter is the **only** file that includes `plugin-sdk` and `mod/amlmod.h`;
 the rest of the mod talks to the engine through `core::IEngineBridge`, which is why
 every system has host unit tests.
 
+## 0. Boot sequence (three stages)
+
+The mod never assumes the engine is ready when the loader calls it. On a real
+device (AML 1.3.0, Android 15, GTA 2.00) touching engine state from `OnModLoad`
+is a SIGSEGV, and the loader itself is a version-dependent vtable that can
+return garbage for slots it does not implement.
+
+| Stage | Entry point | What runs | What must not run |
+| --- | --- | --- | --- |
+| 1. Loader | `OnModLoad` | logger sink, mod directory, `config.json`, save/missions JSON, `libGTASA.so` handle, hooks, symbol table verification | anything reading engine arrays |
+| 1b. All mods | `OnAllModsLoaded` | retry of the loader stage if another mod was still loading | engine work |
+| 2. Runtime | first `CGame::Process` tick **where the player ped exists** | `CModelInfo` scan, road probe, streaming, interiors, ImGui, JNI/CloudSync | - |
+
+`IsEngineLoaded()` is the gate: `FindPlayerPed(0) != nullptr` plus verified
+`CStreaming`/`FindPlayerPed` symbols. During the loading screen the model info
+array is still filling, so scanning then would produce an empty catalogue.
+
+## 0.1 Trust boundary
+
+`src/core/safe.hpp` is applied to everything that crosses the loader/JNI/game
+boundary:
+
+* `IsSanePointer` rejects `nullptr` and anything below `0x10000` - this is what
+  catches a stale AML slot returning `0x7`;
+* `IsMappedRange` probes the actual page table with `mincore(2)` before a
+  dereference (a large stale pointer is rejected too, not just a small one);
+* `IsReadableCString` / `IsSanePath` are used for every `const char*` from AML;
+* `GTASAAdapter::Symbol()` validates every `aml->GetSym` result and disables the
+  feature instead of calling a null pointer;
+* `AndroidHttpTransport::Available()` validates the `JavaVM`/`JNIEnv` interface
+  pointers before any JNI call.
+
 ## 1. Symbol resolution
 
 ```cpp
@@ -98,10 +130,26 @@ exact box bounds when the user runs it on extracted game files.
 
 The adapter never hardcodes an address for anything the mobile build exports.
 
+## 8.1 Crash triage
+
+The device build now ships with `-g1 -funwind-tables` and a linker map, and
+`ON_GAME_CRASH` logs the library, signal, code and offset. To resolve a trace:
+
+```bash
+# artifacts/USA1to1-arm64-v8a/symbols/<abi>-symbols.txt is sorted by address
+awk '$1 <= "000afa66"' arm64-v8a-symbols.txt | tail -3
+# or, with the .so and the map from the same artifact:
+$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-addr2line -f -C -e libUSA1to1.so 0xafa66
+grep -n "0x00000000000afa" arm64-v8a-USA1to1.map | head
+```
+
+Because the mod is linked with `--exclude-libs,ALL`, plugin/ImGui symbols stay
+private; `llvm-nm -C` in the artifact dump is `-C`'d, so the names are readable.
+
 ## 9. Verification status
 
 * Host: `usa1to1_tests` — 38 cases, ~36,600 assertions, all green.
-* Cross-ABI: `tools/arm_compile_check.sh` compiles **all 26 translation units**
+* Cross-ABI: `tools/arm_compile_check.sh` compiles **all 27 translation units**
   (mod + ImGui + plugin-sdk + core) for `aarch64` and `armv7` with clang, catching
   32/64-bit branch and ABI mistakes without the NDK.
 * Linking against `libGTASA.so`, `liblog`, `libandroid` and `libc++_static` happens in

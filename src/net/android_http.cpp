@@ -1,6 +1,7 @@
 #include "android_http.hpp"
 
 #include "core/log.hpp"
+#include "core/safe.hpp"
 
 #include <mod/amlmod.h>
 
@@ -20,6 +21,19 @@ namespace net {
 
 namespace {
 
+// A JNIEnv/JavaVM is a pointer to a struct whose first member is a pointer to a
+// table of function pointers. Both are validated before any call goes through
+// them: a loader that does not implement GetJavaVM hands back 0x7, not a VM.
+bool IsUsableInterface(const void *iface) {
+    if (!core::IsMappedRange(iface, sizeof(void *)))
+        return false;
+    void *const *table = *reinterpret_cast<void *const *const *>(iface);
+    if (!core::IsSanePointer(table) || !core::IsMappedRange(table, sizeof(void *) * 8))
+        return false;
+    // First entries of JNIInvokeInterface/JNINativeInterface are real code.
+    return core::IsSaneHandle(table[0]);
+}
+
 // Attaches the calling thread to the JVM if needed (CloudSync runs on its own
 // worker thread, which the JVM does not know about).
 class EnvScope {
@@ -28,24 +42,23 @@ class EnvScope {
         if (!aml)
             return;
         JavaVM *vm = aml->GetJavaVM();
-        if (!vm)
-            return;
+        if (!IsUsableInterface(vm))
+            return; // loader predates GetJavaVM or returned garbage
+        m_vm = vm;
         JNIEnv *env = nullptr;
-        if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK) {
+        if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK && IsUsableInterface(env)) {
             m_env = env;
             return;
         }
-        if (vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+        env = nullptr;
+        if (vm->AttachCurrentThread(&env, nullptr) == JNI_OK && IsUsableInterface(env)) {
             m_env = env;
             m_attached = true;
         }
     }
     ~EnvScope() {
-        if (m_attached && aml) {
-            JavaVM *vm = aml->GetJavaVM();
-            if (vm)
-                vm->DetachCurrentThread();
-        }
+        if (m_attached && m_vm)
+            m_vm->DetachCurrentThread();
     }
     EnvScope(const EnvScope &) = delete;
     EnvScope &operator=(const EnvScope &) = delete;
@@ -54,28 +67,52 @@ class EnvScope {
     bool Ok() const { return m_env != nullptr; }
 
   private:
+    JavaVM *m_vm = nullptr;
     JNIEnv *m_env = nullptr;
     bool m_attached = false;
 };
 
+void ClearException(JNIEnv *env) {
+    if (env && env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+}
+
 struct JniString {
     JNIEnv *env;
     jstring value = nullptr;
-    JniString(JNIEnv *e, const std::string &s) : env(e), value(e->NewStringUTF(s.c_str())) {}
+    JniString(JNIEnv *e, const std::string &s) : env(e), value(e->NewStringUTF(s.c_str())) {
+        if (!value)
+            ClearException(env);
+    }
     ~JniString() {
         if (value)
             env->DeleteLocalRef(value);
     }
 };
 
-void ClearException(JNIEnv *env) {
-    if (env->ExceptionCheck()) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-    }
-}
-
 } // namespace
+
+bool AndroidHttpTransport::Available() const {
+    if (m_availableChecked)
+        return m_available;
+    m_availableChecked = true;
+    if (!aml) {
+        m_lastError = "AML interface missing";
+        return false;
+    }
+    JavaVM *vm = aml->GetJavaVM();
+    if (!IsUsableInterface(vm)) {
+        m_lastError = std::string("GetJavaVM returned ") + core::HexPointer(vm) + " (loader too old?)";
+        return false;
+    }
+    EnvScope scope;
+    m_available = scope.Ok();
+    if (!m_available)
+        m_lastError = "cannot attach to the JVM";
+    return m_available;
+}
 
 bool AndroidHttpTransport::Fetch(const std::string &url, int timeoutSec, std::string *outBuf, FILE *outFile) {
     EnvScope scope;
@@ -265,6 +302,11 @@ bool AndroidHttpTransport::Download(const std::string &url, const std::string &l
 // refuses politely instead of pretending to have a network.
 bool AndroidHttpTransport::Fetch(const std::string &url, int, std::string *, FILE *) {
     m_lastError = "JNI transport is Android-only (" + url + ")";
+    return false;
+}
+
+bool AndroidHttpTransport::Available() const {
+    m_lastError = "JNI transport is Android-only";
     return false;
 }
 

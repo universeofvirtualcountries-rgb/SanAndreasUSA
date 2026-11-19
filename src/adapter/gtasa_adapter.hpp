@@ -30,12 +30,24 @@ class GTASAAdapter final : public core::IEngineBridge {
     GTASAAdapter();
     ~GTASAAdapter() override;
 
-    // Resolves libGTASA.so, installs hooks, probes the road model.
+    // Loader-only stage: resolves libGTASA.so and installs the hooks. Touches no
+    // game state beyond the symbol tables, so it is safe to run from OnModLoad.
     bool Initialize();
+    // Engine stage: verifies the engine symbols we actually call and probes the
+    // road model. Only valid from the first CGame::Process tick - the model info
+    // array, pools and streaming are not live before that.
+    bool InitializeRuntime();
     void Shutdown();
 
     bool IsReady() const { return m_ready; }
+    bool RuntimeReady() const { return m_runtimeReady; }
+    // True once the world is live (player ped exists, streaming is up). This is
+    // the gate for the runtime stage: before it, model info is still loading.
+    bool IsEngineLoaded();
+    void SetModDirectoryOverride(const std::string &dir) { m_modDirOverride = dir; }
     const std::string &LastError() const { return m_lastError; }
+    // "6/12 engine symbols" style summary for the log/telemetry.
+    std::string SymbolSummary() const;
 
     void SetTickCallback(TickCallback cb) { m_onTick = std::move(cb); }
     void SetTouchCallback(TouchCallback cb) { m_onTouch = std::move(cb); }
@@ -104,6 +116,30 @@ class GTASAAdapter final : public core::IEngineBridge {
         uint64_t engineId = 0;
     };
 
+    // Every engine entry point we call is verified once, up front: a missing
+    // mobile export disables the feature instead of jumping through a null
+    // function pointer.
+    struct EngineSymbols {
+        bool streaming = false;
+        bool requestModel = false;
+        bool releaseModel = false;
+        bool flushModels = false;
+        bool worldAdd = false;
+        bool worldRemove = false;
+        bool objectCreate = false;
+        bool modelInfo = false;
+        bool findPlayer = false;
+        bool findVehicle = false;
+        bool markers = false;
+        bool pools = false;
+        int Present() const;
+        int Total() const { return 12; }
+    };
+
+    void *Symbol(const char *name);
+    bool VerifyEngineSymbols();
+    static double MonotonicSeconds();
+
     void InstallHooks();
     void RemoveHooks();
     int MovePoolEntities(bool peds, bool vehicles, const core::Vec3f &delta, bool includeInterior);
@@ -111,7 +147,11 @@ class GTASAAdapter final : public core::IEngineBridge {
     std::string DetectVersion();
 
     void *m_libHandle = nullptr;
+    uintptr_t m_gameBase = 0;
+    EngineSymbols m_syms;
     bool m_ready = false;
+    bool m_runtimeReady = false;
+    std::string m_modDirOverride;
     bool m_hooksInstalled = false;
     std::string m_lastError;
     std::string m_versionLabel = "unknown";
@@ -119,7 +159,6 @@ class GTASAAdapter final : public core::IEngineBridge {
     double m_lastProcessTime = 0.0;
     double m_now = 0.0;
     float m_fps = 0.0f;
-    uint32_t m_lastFrameMs = 0;
 
     int m_roadModel = -2; // -2 = not probed yet, -1 = nothing found
     int m_interiorArea = 0;

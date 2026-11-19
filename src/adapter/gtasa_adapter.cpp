@@ -1,6 +1,7 @@
 #include "gtasa_adapter.hpp"
 
 #include "core/log.hpp"
+#include "core/safe.hpp"
 
 #include <cfloat> // FLT_EPSILON, used by plugin-sdk/gta_base/Vector.h
 
@@ -23,9 +24,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <sys/stat.h>
+#include <vector>
 #include <filesystem>
 #include <sys/stat.h>
 
@@ -111,6 +116,57 @@ PropTag ClassifyByName(const std::string &name, bool isRoad, float colRadius) {
 GTASAAdapter::GTASAAdapter() = default;
 GTASAAdapter::~GTASAAdapter() { Shutdown(); }
 
+void *GTASAAdapter::Symbol(const char *name) {
+    if (!aml || !m_libHandle)
+        return nullptr;
+    const uintptr_t raw = aml->GetSym(m_libHandle, name);
+    void *addr = reinterpret_cast<void *>(raw);
+    if (!core::IsSaneHandle(addr)) {
+        USA_LOG_W("Adapter: engine symbol %s unavailable (%s) - feature disabled", name,
+                  core::HexPointer(addr).c_str());
+        return nullptr;
+    }
+    return addr;
+}
+
+int GTASAAdapter::EngineSymbols::Present() const {
+    return streaming + requestModel + releaseModel + flushModels + worldAdd + worldRemove + objectCreate + modelInfo +
+           findPlayer + findVehicle + markers + pools;
+}
+
+std::string GTASAAdapter::SymbolSummary() const {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%d/%d engine symbols", m_syms.Present(), m_syms.Total());
+    return std::string(buf);
+}
+
+bool GTASAAdapter::VerifyEngineSymbols() {
+    m_syms.streaming = Symbol("_ZN10CStreaming13IsInitialisedEv") != nullptr;
+    m_syms.requestModel = Symbol("_ZN10CStreaming12RequestModelEii") != nullptr;
+    m_syms.releaseModel = Symbol("_ZN10CStreaming19SetModelIsDeletableEi") != nullptr;
+    m_syms.flushModels = Symbol("_ZN10CStreaming22LoadAllRequestedModelsEb") != nullptr;
+    m_syms.worldAdd = Symbol("_ZN6CWorld3AddEP7CEntity") != nullptr;
+    m_syms.worldRemove = Symbol("_ZN6CWorld6RemoveEP7CEntity") != nullptr;
+    m_syms.objectCreate = Symbol("_ZN7CObject6CreateEib") != nullptr;
+    m_syms.modelInfo = Symbol("_ZN10CModelInfo18IsVehicleModelTypeEi") != nullptr;
+    m_syms.findPlayer = Symbol("_Z13FindPlayerPedi") != nullptr;
+    m_syms.findVehicle = Symbol("_Z17FindPlayerVehicleib") != nullptr;
+    m_syms.markers =
+        Symbol(BYBIT("_ZN10C3dMarkers11PlaceMarkerEjtR7CVectorfhhhhtfsfffb",
+                     "_ZN10C3dMarkers11PlaceMarkerEytR7CVectorfhhhhtfsfffb")) != nullptr;
+    // Pools are fixed-address globals: usable only once the game base is known.
+    m_syms.pools = core::IsSanePointer(reinterpret_cast<const void *>(m_gameBase));
+
+    USA_LOG_I("Adapter: %s (%s)", SymbolSummary().c_str(), m_versionLabel.c_str());
+    return m_syms.Present() > 0;
+}
+
+double GTASAAdapter::MonotonicSeconds() {
+    using Clock = std::chrono::steady_clock;
+    static const Clock::time_point start = Clock::now();
+    return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
 bool GTASAAdapter::Initialize() {
     if (m_ready)
         return true;
@@ -120,15 +176,39 @@ bool GTASAAdapter::Initialize() {
         return false;
     }
 
-    m_libHandle = aml->GetLibHandle("libGTASA.so");
-    if (!m_libHandle) {
-        m_lastError = "libGTASA.so not found in the process";
-        USA_LOG_E("%s", m_lastError.c_str());
+    // The loader itself is third-party code with a version-dependent vtable.
+    // Slot 0 (GetCurrentGame) and slot 4 (GetLib) have existed since the first
+    // AML release; everything newer is treated as "may return garbage".
+    const char *game = aml->GetCurrentGame();
+    if (core::IsReadableCString(game, 256) && game[0] != '\0')
+        USA_LOG_I("Adapter: loader game = %s", game);
+    else
+        USA_LOG_W("Adapter: GetCurrentGame returned %s, continuing with defaults",
+                  core::HexPointer(game).c_str());
+
+    const uintptr_t base = aml->GetLib("libGTASA.so");
+    if (core::IsSanePointer(reinterpret_cast<const void *>(base))) {
+        m_gameBase = base;
+        USA_LOG_I("Adapter: libGTASA.so base = %s", core::HexPointer(reinterpret_cast<const void *>(base)).c_str());
+    } else {
+        USA_LOG_E("Adapter: GetLib(libGTASA.so) returned %s - engine data is unreachable",
+                  core::HexPointer(reinterpret_cast<const void *>(base)).c_str());
+        m_lastError = "libGTASA.so base address unavailable";
         return false;
     }
 
+    // GetLibHandle is a much newer slot (28). Its result is validated before it
+    // is handed to GetSym: a stale slot returns small garbage, not a handle.
+    void *handle = aml->GetLibHandle("libGTASA.so");
+    if (!core::IsSaneHandle(handle)) {
+        USA_LOG_E("Adapter: GetLibHandle returned %s (loader predates this API?)", core::HexPointer(handle).c_str());
+        m_lastError = "loader does not provide a libGTASA.so handle";
+        return false;
+    }
+    m_libHandle = handle;
+
     m_versionLabel = DetectVersion();
-    USA_LOG_I("Adapter: libGTASA.so @ %p, version %s", m_libHandle, m_versionLabel.c_str());
+    USA_LOG_I("Adapter: handle %s, version %s", core::HexPointer(m_libHandle).c_str(), m_versionLabel.c_str());
 
     InstallHooks();
     if (!m_hooksInstalled) {
@@ -136,14 +216,32 @@ bool GTASAAdapter::Initialize() {
         return false;
     }
 
-    // Probe the road model once the game image is up; the streaming pool is not
-    // ready that early, so we only record the id here.
-    ProbeRoadModel();
+    // Resolving symbols only touches the loader tables, so it is safe here even
+    // though the engine itself is still loading.
+    VerifyEngineSymbols();
 
     g_adapter = this;
     m_ready = true;
     m_lastProcessTime = 0.0;
-    USA_LOG_I("Adapter: ready");
+    USA_LOG_I("Adapter: hooks installed (engine stage waits for the first game tick)");
+    return true;
+}
+
+bool GTASAAdapter::InitializeRuntime() {
+    if (m_runtimeReady)
+        return true;
+    if (!m_ready || !m_hooksInstalled) {
+        m_lastError = "runtime requested before the loader stage completed";
+        return false;
+    }
+
+    if (m_syms.modelInfo)
+        ProbeRoadModel();
+    else
+        USA_LOG_W("Adapter: model info unavailable, road model stays unknown");
+
+    m_runtimeReady = true;
+    USA_LOG_I("Adapter: runtime ready (streaming/pools/model info are live)");
     return true;
 }
 
@@ -153,8 +251,9 @@ void GTASAAdapter::InstallHooks() {
 
     auto hookSym = [this](const char *sym, void *replacement, void **original, const char *label) -> bool {
         void *addr = reinterpret_cast<void *>(aml->GetSym(m_libHandle, sym));
-        if (!addr) {
-            USA_LOG_W("Adapter: symbol %s (%s) not exported by this build", sym, label);
+        if (!core::IsSaneHandle(addr)) {
+            USA_LOG_W("Adapter: symbol %s (%s) not exported by this build (%s)", sym, label,
+                      core::HexPointer(addr).c_str());
             return false;
         }
         const bool ok = aml->Hook(addr, replacement, original);
@@ -218,6 +317,8 @@ void GTASAAdapter::Shutdown() {
                                 0.0f, 1.0f, false);
     }
     m_ready = false;
+    m_runtimeReady = false;
+    m_syms = EngineSymbols{};
     g_adapter = nullptr;
 }
 
@@ -226,13 +327,15 @@ void GTASAAdapter::Shutdown() {
 // ---------------------------------------------------------------------------
 
 void GTASAAdapter::OnGameProcess() {
-    const uint32_t nowMs = CTimer::GetTimeInMS();
-    double dt = 0.0;
-    if (m_lastFrameMs != 0 && nowMs >= m_lastFrameMs)
-        dt = static_cast<double>(nowMs - m_lastFrameMs) / 1000.0;
-    m_lastFrameMs = nowMs;
-    m_now = static_cast<double>(nowMs) / 1000.0;
-
+    // Before the runtime stage the engine clock is not trusted: use the plain
+    // monotonic clock so the very first tick still reaches ModApp::OnTick (that
+    // tick is what boots the runtime stage in the first place).
+    const double now = m_runtimeReady ? static_cast<double>(CTimer::GetTimeInMS()) / 1000.0 : MonotonicSeconds();
+    double dt = 1.0 / 60.0;
+    if (m_lastProcessTime > 0.0 && now > m_lastProcessTime)
+        dt = now - m_lastProcessTime;
+    m_lastProcessTime = now;
+    m_now = now;
     if (dt > 0.0005 && dt < 0.5) {
         const float instant = static_cast<float>(1.0 / dt);
         m_fps = m_fps <= 0.0f ? instant : m_fps * 0.9f + instant * 0.1f;
@@ -256,13 +359,23 @@ void GTASAAdapter::OnGameShutdown() {
 // Player / vehicle / camera
 // ---------------------------------------------------------------------------
 
+bool GTASAAdapter::IsEngineLoaded() {
+    if (!m_ready || !m_syms.findPlayer || !m_syms.streaming)
+        return false;
+    return FindPlayerPed(0) != nullptr;
+}
+
 bool GTASAAdapter::IsGameReady() {
     // CStreaming is initialised once the world is live; before that the player
     // does not exist yet and any shift would be garbage.
-    return m_ready && FindPlayerPed(0) != nullptr && CStreaming::IsInitialised();
+    if (!m_runtimeReady || !m_syms.findPlayer || !m_syms.streaming)
+        return false;
+    return FindPlayerPed(0) != nullptr && CStreaming::IsInitialised();
 }
 
 bool GTASAAdapter::GetPlayerPosition(Vec3f &out) {
+    if (!m_runtimeReady || !m_syms.findPlayer)
+        return false;
     CPlayerPed *ped = FindPlayerPed(0);
     if (!ped)
         return false;
@@ -271,6 +384,8 @@ bool GTASAAdapter::GetPlayerPosition(Vec3f &out) {
 }
 
 void GTASAAdapter::SetPlayerPosition(const Vec3f &pos) {
+    if (!m_runtimeReady || !m_syms.findPlayer)
+        return;
     CPlayerPed *ped = FindPlayerPed(0);
     if (!ped) {
         USA_LOG_W("Adapter: SetPlayerPosition without a player ped");
@@ -283,7 +398,11 @@ void GTASAAdapter::SetPlayerPosition(const Vec3f &pos) {
     phys->m_vecMoveSpeed = savedSpeed; // teleport must never eat inertia
 }
 
-bool GTASAAdapter::IsPlayerInVehicle() { return FindPlayerVehicle(0, false) != nullptr; }
+bool GTASAAdapter::IsPlayerInVehicle() {
+    if (!m_runtimeReady || !m_syms.findVehicle)
+        return false;
+    return FindPlayerVehicle(0, false) != nullptr;
+}
 
 float GTASAAdapter::GetFps() { return m_fps; }
 
@@ -453,6 +572,8 @@ int GTASAAdapter::ShiftStreamedEntities(const Vec3f &delta, bool includeInterior
 
 bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
     (void)dynamic;
+    if (!m_runtimeReady || !m_syms.streaming || !m_syms.requestModel)
+        return false;
     if (modelId < 0 || modelId >= kMaxModelIds)
         return false;
     if (!CStreaming::IsInitialised())
@@ -462,6 +583,8 @@ bool GTASAAdapter::RequestModel(int modelId, bool dynamic) {
 }
 
 bool GTASAAdapter::IsModelLoaded(int modelId) {
+    if (!m_runtimeReady || !m_syms.streaming)
+        return false;
     if (modelId < 0 || modelId >= kMaxModelIds)
         return false;
     if (!CStreaming::IsInitialised())
@@ -470,12 +593,16 @@ bool GTASAAdapter::IsModelLoaded(int modelId) {
 }
 
 void GTASAAdapter::ReleaseModel(int modelId) {
+    if (!m_runtimeReady || !m_syms.streaming || !m_syms.releaseModel)
+        return;
     if (modelId < 0 || modelId >= kMaxModelIds || !CStreaming::IsInitialised())
         return;
     CStreaming::SetModelIsDeletable(modelId);
 }
 
 void GTASAAdapter::FlushModelStreaming() {
+    if (!m_runtimeReady || !m_syms.streaming || !m_syms.flushModels)
+        return;
     if (!CStreaming::IsInitialised())
         return;
     // Blocking by design: called on a door transition, never from the chunk loop.
@@ -560,6 +687,8 @@ void GTASAAdapter::MoveObject(ObjectHandle handle, const Vec3f &pos) {
 // ---------------------------------------------------------------------------
 
 void GTASAAdapter::PlaceMarker(uint64_t markerId, const Vec3f &pos, float radius, bool interior) {
+    if (!m_runtimeReady || !m_syms.markers)
+        return;
     if (!markerId)
         return;
 
@@ -604,6 +733,8 @@ void GTASAAdapter::PlaceMarker(uint64_t markerId, const Vec3f &pos, float radius
 }
 
 void GTASAAdapter::RemoveMarker(uint64_t markerId) {
+    if (!m_syms.markers)
+        return;
     auto it = m_markers.find(markerId);
     if (it == m_markers.end())
         return;
@@ -637,29 +768,105 @@ void GTASAAdapter::Vibrate(int ms) {
 }
 
 double GTASAAdapter::NowSeconds() {
-    if (!CStreaming::IsInitialised())
-        return 0.0;
+    // CTimer lives in the game image; before the runtime stage its globals are
+    // not guaranteed to be reachable, so the clock starts as a plain monotonic
+    // counter and switches to the engine clock once it is verified.
+    if (!m_runtimeReady || !m_syms.streaming || !CStreaming::IsInitialised())
+        return MonotonicSeconds();
     return static_cast<double>(CTimer::GetTimeInMS()) / 1000.0;
 }
 
+namespace {
+
+bool DirectoryExists(const std::string &path) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool EnsureDirectory(const std::string &path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    return DirectoryExists(path);
+}
+
+// Takes the directory part of a loader-provided *file* path and appends the mod
+// folder, dropping the app's private "files" segment when it is there.
+std::string ModDirectoryFromFile(const char *file, const char *folder) {
+    std::string path(file);
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos || slash == 0)
+        return std::string();
+    std::string dir = path.substr(0, slash);
+    const std::string filesSuffix = "/files";
+    if (dir.size() > filesSuffix.size() &&
+        dir.compare(dir.size() - filesSuffix.size(), filesSuffix.size(), filesSuffix) == 0)
+        dir.erase(dir.size() - filesSuffix.size());
+    if (dir.empty())
+        return std::string();
+    return dir + "/" + folder;
+}
+
+} // namespace
+
+// Paths are resolved without touching any AML slot newer than GetConfigPath /
+// GetDataPath: on a loader that predates them, calling a missing slot returns
+// garbage (a value like 0x7) and std::string on it is an instant SIGSEGV.
 std::string GTASAAdapter::ModDirectory() {
-    // PreferAML's per-game mods path: /sdcard/AMLMods/<game>/USA1to1
+    if (!m_modDirOverride.empty())
+        return m_modDirOverride;
+
+    static const char *kFolder = "USA1to1";
+
+    std::string package = "com.rockstargames.gtasa";
     if (aml) {
-        const char *base = aml->GetInternalModsPath();
-        if (base && *base) {
-            std::string dir = std::string(base) + "/USA1to1";
-            std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
-            return dir;
-        }
-        const char *data = aml->GetAndroidDataPath();
-        if (data && *data) {
-            std::string dir = std::string(data) + "/USA1to1";
-            std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
-            return dir;
+        const char *game = aml->GetCurrentGame();
+        if (core::IsReadableCString(game, 256) && game[0] != '\0' && std::strchr(game, '/') == nullptr &&
+            std::strchr(game, ' ') == nullptr)
+            package = game;
+        else
+            USA_LOG_W("Adapter: GetCurrentGame returned %s, assuming %s", core::HexPointer(game).c_str(),
+                      package.c_str());
+    }
+
+    // 1) The standard AML layout, same order the loader itself documents.
+    const std::string standard[] = {
+        "/storage/emulated/0/AMLMods/" + package + "/" + kFolder,
+        "/sdcard/AMLMods/" + package + "/" + kFolder,
+        "/storage/emulated/0/Android/data/" + package + "/files/" + kFolder,
+    };
+    for (const std::string &candidate : standard) {
+        if (DirectoryExists(candidate))
+            return candidate;
+    }
+    for (const std::string &candidate : standard) {
+        if (EnsureDirectory(candidate)) {
+            USA_LOG_I("Adapter: created mod directory %s", candidate.c_str());
+            return candidate;
         }
     }
+
+    // 2) Loader config/data paths (ancient slots). Validated before use.
+    if (aml) {
+        const char *cfg = aml->GetConfigPath();
+        if (core::IsSanePath(cfg)) {
+            const std::string dir = ModDirectoryFromFile(cfg, kFolder);
+            if (!dir.empty() && (DirectoryExists(dir) || EnsureDirectory(dir)))
+                return dir;
+        } else {
+            USA_LOG_W("Adapter: GetConfigPath returned %s, ignored", core::HexPointer(cfg).c_str());
+        }
+
+        const char *data = aml->GetDataPath();
+        if (core::IsSanePath(data)) {
+            const std::string dir = ModDirectoryFromFile(data, kFolder);
+            if (!dir.empty() && (DirectoryExists(dir) || EnsureDirectory(dir)))
+                return dir;
+        } else {
+            USA_LOG_W("Adapter: GetDataPath returned %s, ignored", core::HexPointer(data).c_str());
+        }
+    }
+
+    USA_LOG_W("Adapter: no writable mod directory found, saving next to the process cwd");
     return ".";
 }
 
