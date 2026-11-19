@@ -168,12 +168,8 @@ void GTASAAdapter::InstallHooks() {
     bool any = false;
     any |= hookSym("_ZN5CGame7ProcessEv", reinterpret_cast<void *>(&HookGameProcess),
                    reinterpret_cast<void **>(&g_origGameProcess), "CGame::Process");
-    if (!g_origTouchEvent) {
-        if (hookSym("_Z14AND_TouchEventiiii", reinterpret_cast<void *>(&HookTouchEvent),
-                    reinterpret_cast<void **>(&g_origTouchEvent), "AND_TouchEvent")) {
-            any = true;
-        }
-    }
+    any |= hookSym("_Z14AND_TouchEventiiii", reinterpret_cast<void *>(&HookTouchEvent),
+                   reinterpret_cast<void **>(&g_origTouchEvent), "AND_TouchEvent");
     if (hookSym("_ZN5CGame8ShutdownEv", reinterpret_cast<void *>(&HookShutdown),
                 reinterpret_cast<void **>(&g_origShutdown), "CGame::Shutdown")) {
         any = true;
@@ -189,8 +185,8 @@ void GTASAAdapter::RemoveHooks() {
 }
 
 std::string GTASAAdapter::DetectVersion() {
-    // The presence of a 64-bit-only symbol tells us we are on 2.10+ (arm64/arm64-v8a)
-    // while the 32-bit mangling variant only exists on 2.00 (armeabi-v7a).
+    // AML32/AML64 come from mod/amlmod.h, which derives them from the target
+    // arch (__arm__ / __aarch64__), i.e. exactly the ABI of the game build.
 #if defined(AML64)
     return "2.10+ arm64-v8a";
 #else
