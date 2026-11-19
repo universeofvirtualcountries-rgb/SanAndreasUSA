@@ -35,7 +35,17 @@ boundary:
 * `GTASAAdapter::Symbol()` validates every `aml->GetSym` result and disables the
   feature instead of calling a null pointer;
 * `AndroidHttpTransport::Available()` validates the `JavaVM`/`JNIEnv` interface
-  pointers before any JNI call.
+  pointers before any JNI call;
+* `IsUsableTableEntry` guards dense-but-not-really engine tables: the slot has to
+  be mapped **and** the pointer it holds has to cover a whole structure. Stock
+  2.00 leaves `CModelInfo::ms_modelInfoPtrs` slots holding plain integers, so
+  `info->m_szModelName[0]` on slot value `10184` faulted at `0x27D0` — that is
+  now a skip plus a log line.
+
+The scan never goes past `content.model_id_limit` (default **20000**, ceiling
+26316 for Fastman92-remapped ids). `Adapter: live catalogue built, N models,
+K slots rejected (limit L, first bad index I)` says exactly how far the table is
+trustworthy on that installation.
 
 ## 1. Symbol resolution
 
@@ -114,7 +124,7 @@ skips interior Z, the main world offset is untouched while the player is inside.
 
 ## 7. Model catalogue
 
-`BuildLiveCatalog()` walks `CModelInfo::ms_modelInfoPtrs[400..26316]`, skips LODs,
+`BuildLiveCatalog()` walks `CModelInfo::ms_modelInfoPtrs[400..model_id_limit]`, skips LODs,
 vehicles and zero-draw-distance entries, reads `m_szModelName`, `m_fDrawDistance`,
 `bIsRoad` and the collision bound sphere (`m_pColModel->m_boundSphere`) and classifies
 models into the generator's tags. `tools/parse_ide.py` produces the same schema with

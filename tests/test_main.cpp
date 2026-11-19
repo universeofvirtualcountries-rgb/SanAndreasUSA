@@ -971,6 +971,7 @@ TEST(config_roundtrip_and_clamps) {
     CHECK(loaded.spawnCity == "Las Vegas");
     CHECK(!loaded.cloudSyncEnabled);
     CHECK(!loaded.manifestUrl.empty());
+    CHECK(loaded.modelIdLimit == 20000); // stock 2.00 table size
     fs::remove(path);
 
     // A hand-edited file with insane values must be clamped, not trusted.
@@ -979,6 +980,20 @@ TEST(config_roundtrip_and_clamps) {
     CHECK(wild.FromJson(root));
     CHECK(wild.gridRadius == 3);
     CHECK_NEAR(wild.localLimit, 1000.0, 1e-9);
+
+    // The model scan limit decides how far into CModelInfo we may look.
+    Json small = Json::Parse(R"({"content":{"model_id_limit":10}})");
+    ModConfig clampedLow;
+    CHECK(clampedLow.FromJson(small));
+    CHECK(clampedLow.modelIdLimit == 400);
+    Json huge = Json::Parse(R"({"content":{"model_id_limit":900000}})");
+    ModConfig clampedHigh;
+    CHECK(clampedHigh.FromJson(huge));
+    CHECK(clampedHigh.modelIdLimit == 26316);
+    Json ok = Json::Parse(R"({"content":{"model_id_limit":24000}})");
+    ModConfig kept;
+    CHECK(kept.FromJson(ok));
+    CHECK(kept.modelIdLimit == 24000);
 }
 
 TEST(config_missing_file_is_default) {
@@ -1095,6 +1110,29 @@ TEST(safe_pointers_validate_strings_and_paths) {
     CHECK(core::SanePathOr(good, "/fallback") == std::string(good));
     CHECK(core::SanePathOr(nullptr, nullptr).empty());
     CHECK(core::HexPointer(reinterpret_cast<const void *>(0x7)) == "0x7");
+}
+
+TEST(model_table_garbage_entries_are_rejected) {
+    // Mirrors the device crash: ms_modelInfoPtrs[i] held the integer 10184
+    // (0x27C8) instead of a pointer, and info->m_szModelName[0] faulted at
+    // 0x27C8 + 8. Such entries must be rejected, not dereferenced.
+    struct FakeInfo {
+        void *vptr;
+        int flags;
+    };
+    FakeInfo good{nullptr, 1};
+    FakeInfo *table[4] = {nullptr, reinterpret_cast<FakeInfo *>(0x27C8), &good, nullptr};
+    FakeInfo *out = nullptr;
+
+    CHECK(!core::IsUsableTableEntry(table, 0, out, sizeof(FakeInfo))); // null slot
+    CHECK(!core::IsUsableTableEntry(table, 1, out, sizeof(FakeInfo))); // 0x27C8
+    CHECK(out == nullptr);
+    CHECK(core::IsUsableTableEntry(table, 2, out, sizeof(FakeInfo)));
+    CHECK(out == &good);
+    CHECK(!core::IsUsableTableEntry(static_cast<FakeInfo **>(nullptr), 0, out, sizeof(FakeInfo)));
+    CHECK(!core::IsUsableTableEntry(table, -1, out, sizeof(FakeInfo)));
+    // A structure size that runs past the mapping must be rejected too.
+    CHECK(!core::IsUsableTableEntry(table, 2, out, 1u << 20));
 }
 
 int main() {

@@ -192,6 +192,11 @@ void ModApp::BootRuntime() {
 
     logger->Info("USA 1:1: %s", m_adapter.SymbolSummary().c_str());
 
+    // Model table size for this installation: stock 2.00 fills 20000 slots,
+    // Fastman92's limit adjuster can raise it. Scanning past the real size walks
+    // into slots that hold plain integers, not model pointers.
+    m_adapter.SetModelIdLimit(m_config.modelIdLimit);
+
     LoadCatalogue();
 
     FloatingOrigin::Config originCfg;
