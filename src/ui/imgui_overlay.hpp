@@ -35,6 +35,8 @@ struct OverlayModel {
     std::string missionLabel;
     std::string cloudLabel;
     std::string saveLabel;
+    std::string statusLine;         // last ShowToast() message, rendered in-menu
+    double statusAgeSec = 1e9;      // for the transient banner
     bool polygonActive = false;
     bool insideInterior = false;
     bool streamingEnabled = true;
@@ -58,6 +60,8 @@ class ImGuiOverlay {
     void SetMissions(const core::MissionManager *missions, const core::WorldDelta *delta);
 
     void Toggle();
+    // Corner button drawn even while the menu is closed.
+    void DrawCornerButton();
     void SetVisible(bool visible) { m_visible = visible; }
     bool Visible() const { return m_visible; }
     size_t ToggleCount() const { return m_toggleCount; }

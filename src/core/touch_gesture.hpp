@@ -16,6 +16,42 @@
 namespace usa1to1 {
 namespace core {
 
+// Single-finger tap in the top-left corner ("[USA 1:1]" button).
+//
+// Fed from the same AND_TouchEvent hook as the swipe, so the overlay can be
+// opened even when the game (or a vendor touch layer) swallows input before
+// ImGui ever sees it. Coordinates are screen pixels, y grows downwards.
+class CornerTapDetector {
+  public:
+    struct Config {
+        float zoneWidthPx = 150.0f;
+        float zoneHeightPx = 64.0f;
+        float maxMovePx = 24.0f;
+        double maxDurationSec = 0.30;
+        double cooldownSec = 0.25;
+    };
+
+    CornerTapDetector();
+    explicit CornerTapDetector(Config config);
+
+    // Returns true exactly once per recognised tap.
+    bool Feed(int action, int track, int x, int y, double nowSeconds);
+    void Reset();
+
+    size_t TriggerCount() const { return m_triggers; }
+
+  private:
+    Config m_config;
+    bool m_down = false;
+    bool m_multiTouch = false;
+    int m_track = -1;
+    float m_downX = 0.0f;
+    float m_downY = 0.0f;
+    double m_downTime = 0.0;
+    double m_lastTrigger = -1e9;
+    size_t m_triggers = 0;
+};
+
 class TwoFingerSwipeDetector {
   public:
     struct Config {

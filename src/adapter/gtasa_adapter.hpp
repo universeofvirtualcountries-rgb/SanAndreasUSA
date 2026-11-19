@@ -12,6 +12,7 @@
 
 #include "core/engine_bridge.hpp"
 #include "core/model_catalog.hpp"
+#include "core/status_feed.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -50,6 +51,9 @@ class GTASAAdapter final : public core::IEngineBridge {
     void SetModelIdLimit(int limit);
     int ModelScanLimit() const;
     const std::string &LastError() const { return m_lastError; }
+    // Status messages for the overlay. Never routed through aml->ShowToast():
+    // that is a JNI facade and calling it from the game thread aborts on ART.
+    const core::StatusFeed &Status() const { return m_status; }
     // "6/12 engine symbols" style summary for the log/telemetry.
     std::string SymbolSummary() const;
 
@@ -169,6 +173,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     int m_interiorArea = 0;
     uint64_t m_nextMarkerEngineId = 0x55000000ULL;
 
+    core::StatusFeed m_status;
     std::unordered_map<uintptr_t, OwnedObject> m_owned;
     std::unordered_map<uint64_t, MarkerInfo> m_markers;
 

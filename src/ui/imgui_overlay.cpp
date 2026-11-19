@@ -66,7 +66,55 @@ void ImGuiOverlay::RenderCallback() {
         g_overlay->Draw();
 }
 
+// Small, always visible "[USA 1:1]" pill in the top-left corner. The two-finger
+// swipe stays, but vendor touch layers and the game itself can swallow a swipe,
+// so there is a plain one-tap way in - and a matching corner-tap detector in
+// core::CornerTapDetector as a fallback when ImGui gets no input at all.
+void ImGuiOverlay::DrawCornerButton() {
+    const ImVec4 bg(0.05f, 0.05f, 0.08f, 0.42f);
+    ImGui::SetNextWindowPos(ImVec2(8.0f, 8.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(118.0f, 36.0f), ImGuiCond_Always);
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                   ImGuiWindowFlags_NoCollapse;
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, bg);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.10f, 0.14f, 0.30f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.20f, 0.28f, 0.55f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.30f, 0.40f, 0.65f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(3.0f, 3.0f));
+
+    if (ImGui::Begin("##usa1to1_corner", nullptr, flags)) {
+        if (ImGui::Button("[USA 1:1]", ImVec2(112.0f, 30.0f)))
+            Toggle();
+    }
+    ImGui::End();
+
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+}
+
 void ImGuiOverlay::Draw() {
+    // Drawn before the visibility check: the corner button is the way *in*.
+    DrawCornerButton();
+
+    // Status line from ShowToast() (no AML toasts - they abort on ART): a short
+    // centred banner that does not depend on the menu being open.
+    if (!m_model.statusLine.empty() && m_model.statusAgeSec < 3.0) {
+        const ImGuiIO &io = ImGui::GetIO();
+        const float w = io.DisplaySize.x > 0.0f ? io.DisplaySize.x : 1280.0f;
+        const char *text = m_model.statusLine.c_str();
+        const float textWidth = ImGui::CalcTextSize(text).x;
+        const float alpha = m_model.statusAgeSec > 2.0 ? static_cast<float>(3.0 - m_model.statusAgeSec) : 1.0f;
+        ImGui::GetForegroundDrawList()->AddText(ImVec2((w - textWidth) * 0.5f, 56.0f),
+                                                IM_COL32(0, 0, 0, static_cast<int>(160 * alpha)), text);
+        ImGui::GetForegroundDrawList()->AddText(ImVec2((w - textWidth) * 0.5f - 1.0f, 55.0f),
+                                                IM_COL32(255, 236, 160, static_cast<int>(230 * alpha)), text);
+    }
+
     if (!m_visible)
         return;
 
@@ -108,6 +156,8 @@ void ImGuiOverlay::Draw() {
                 ImGui::TextWrapped("Active: %s", m_model.missionLabel.c_str());
             if (!m_model.saveLabel.empty())
                 TextDim("%s", m_model.saveLabel.c_str());
+            if (!m_model.statusLine.empty())
+                TextDim("status: %s", m_model.statusLine.c_str());
             ImGui::EndTabItem();
         }
 

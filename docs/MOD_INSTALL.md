@@ -48,11 +48,18 @@ Grant storage permission to the game, otherwise the mod cannot write
 1. Launch GTA SA through AML, load a save.
 2. The mod teleports you to **Los Angeles** on the 1:1 plane (configurable:
    `content.spawn_city` in `config.json`).
-3. **Two-finger swipe down** anywhere on the screen opens the overlay.
+3. Open the overlay with a **two-finger swipe down** anywhere, or tap the small
+   semi-transparent **[USA 1:1]** pill in the top-left corner (drawn even while
+   the menu is closed; tap it again to close). The corner tap goes through the
+   mod's own touch hook, so it works on devices where the game swallows the
+   swipe.
 4. `Polygon` tab → *Start polygon* spawns the endless road with a yellow marker
    every 200 m. Drive it and watch `Origin shifts` in the telemetry tab climb.
 5. `Teleports` tab → jump to New York / Washington / Las Vegas / Los Angeles.
 6. `Missions` tab → start a JSON mission. The state is saved in `world_delta.json`.
+7. Short status messages ("Entering shop...", "Mission complete", "+$2500")
+   appear as a centred banner for 3 seconds and in the telemetry tab - they are
+   rendered by the overlay, not by AML toasts (those abort on Android 15).
 
 ## 5. Optional: exact collision data
 

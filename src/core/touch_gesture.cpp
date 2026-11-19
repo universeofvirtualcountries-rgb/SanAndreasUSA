@@ -14,6 +14,79 @@ constexpr int kActionPointerDown = 5;
 constexpr int kActionPointerUp = 6;
 } // namespace
 
+CornerTapDetector::CornerTapDetector() : CornerTapDetector(Config()) {}
+
+CornerTapDetector::CornerTapDetector(Config config) : m_config(config) {
+    if (m_config.zoneWidthPx <= 0.0f)
+        m_config.zoneWidthPx = 150.0f;
+    if (m_config.zoneHeightPx <= 0.0f)
+        m_config.zoneHeightPx = 64.0f;
+    if (m_config.maxMovePx < 0.0f)
+        m_config.maxMovePx = 0.0f;
+    if (m_config.maxDurationSec <= 0.0)
+        m_config.maxDurationSec = 0.3;
+    if (m_config.cooldownSec < 0.0)
+        m_config.cooldownSec = 0.0;
+}
+
+void CornerTapDetector::Reset() {
+    m_down = false;
+    m_multiTouch = false;
+    m_track = -1;
+}
+
+bool CornerTapDetector::Feed(int action, int track, int x, int y, double nowSeconds) {
+    const float fx = static_cast<float>(x);
+    const float fy = static_cast<float>(y);
+    const bool inZone = fx >= 0.0f && fy >= 0.0f && fx <= m_config.zoneWidthPx && fy <= m_config.zoneHeightPx;
+
+    switch (action) {
+    case kActionPointerDown:
+    case kActionPointerUp:
+        m_multiTouch = true; // second finger: not a corner tap
+        return false;
+    case kActionDown:
+        m_multiTouch = false;
+        m_down = inZone;
+        m_track = track;
+        m_downX = fx;
+        m_downY = fy;
+        m_downTime = nowSeconds;
+        return false;
+    case kActionMove: {
+        if (!m_down || m_multiTouch || inZone)
+            return false;
+        const float dx = fx - m_downX;
+        const float dy = fy - m_downY;
+        if (std::sqrt(dx * dx + dy * dy) > m_config.maxMovePx)
+            m_down = false; // dragged: that is a camera/steer gesture, not a tap
+        return false;
+    }
+    case kActionUp: {
+        const bool wasDown = m_down && !m_multiTouch && (m_track < 0 || track == m_track);
+        m_down = false;
+        m_track = -1;
+        if (!wasDown || !inZone)
+            return false;
+        const double duration = nowSeconds - m_downTime;
+        if (duration < 0.0 || duration > m_config.maxDurationSec)
+            return false;
+        if (nowSeconds - m_lastTrigger < m_config.cooldownSec)
+            return false;
+        m_lastTrigger = nowSeconds;
+        ++m_triggers;
+        return true;
+    }
+    case kActionCancel:
+        m_down = false;
+        m_multiTouch = false;
+        m_track = -1;
+        return false;
+    default:
+        return false;
+    }
+}
+
 TwoFingerSwipeDetector::TwoFingerSwipeDetector() : TwoFingerSwipeDetector(Config()) {}
 
 TwoFingerSwipeDetector::TwoFingerSwipeDetector(Config config) : m_config(config) {

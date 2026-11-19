@@ -25,6 +25,7 @@ LOCAL_SRC_FILES := \
     src/core/mission.cpp \
     src/core/test_polygon.cpp \
     src/core/touch_gesture.cpp \
+    src/core/status_feed.cpp \
     src/core/config.cpp \
     src/net/cloud_sync.cpp \
     mod/logger.cpp \

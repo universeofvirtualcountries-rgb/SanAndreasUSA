@@ -781,14 +781,19 @@ void GTASAAdapter::SetPlayerInterior(int areaId) {
     CGame::currArea = areaId; // tells the game which interior the camera lives in
 }
 
+// Both of these used to go through aml->ShowToast() / aml->DoVibro(). Those are
+// JNI facades: AML calls Java methods with a JNIEnv cached from another thread,
+// which on Android 15 (ART) ends in art::JavaVMExt::JniAbort and kills the
+// process. Status is now logged and rendered by the ImGui overlay instead.
 void GTASAAdapter::ShowToast(const std::string &msg) {
-    if (aml)
-        aml->ShowToast(false, "%s", msg.c_str());
+    USA_LOG_I("status: %s", msg.c_str());
+    m_status.Push(msg, NowSeconds());
 }
 
 void GTASAAdapter::Vibrate(int ms) {
-    if (aml && ms > 0)
-        aml->DoVibro(ms);
+    if (ms <= 0)
+        return;
+    USA_LOG_D("vibrate(%d ms) ignored: no JNI facades are used on the game thread", ms);
 }
 
 double GTASAAdapter::NowSeconds() {

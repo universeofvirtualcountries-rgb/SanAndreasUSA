@@ -12,6 +12,7 @@
 #include "core/json.hpp"
 #include "core/log.hpp"
 #include "core/safe.hpp"
+#include "core/status_feed.hpp"
 #include "core/mission.hpp"
 #include "core/model_catalog.hpp"
 #include "core/regions.hpp"
@@ -1133,6 +1134,73 @@ TEST(model_table_garbage_entries_are_rejected) {
     CHECK(!core::IsUsableTableEntry(table, -1, out, sizeof(FakeInfo)));
     // A structure size that runs past the mapping must be rejected too.
     CHECK(!core::IsUsableTableEntry(table, 2, out, 1u << 20));
+}
+
+TEST(status_feed_keeps_recent_messages) {
+    core::StatusFeed feed;
+    std::string out;
+    CHECK(!feed.Latest(out, 0.0));
+    CHECK(feed.LastAge(0.0) > 1e8);
+
+    feed.Push("Entering shop...", 10.0);
+    CHECK(feed.Latest(out, 10.5));
+    CHECK(out == "Entering shop...");
+    CHECK(feed.Fresh(out, 12.0, 3.0));
+    CHECK(!feed.Fresh(out, 13.5, 3.0));
+    CHECK_NEAR(feed.LastAge(13.0), 3.0, 1e-9);
+
+    for (int i = 0; i < 20; ++i)
+        feed.Push("message " + std::to_string(i), 20.0 + i);
+    CHECK(feed.Size() == core::StatusFeed::kCapacity);
+    CHECK(feed.LastText() == "message 19");
+
+    feed.Push("", 40.0); // empty messages are ignored
+    CHECK(feed.LastText() == "message 19");
+
+    feed.Clear();
+    CHECK(feed.Size() == 0);
+    CHECK(!feed.Latest(out, 41.0));
+}
+
+TEST(corner_tap_toggles_without_swipe) {
+    core::CornerTapDetector tap;
+    // Plain tap inside the top-left corner.
+    CHECK(!tap.Feed(0, 0, 20, 20, 1.000));
+    CHECK(tap.Feed(1, 0, 22, 21, 1.100));
+    CHECK(tap.TriggerCount() == 1);
+
+    // Same spot again within the cooldown: ignored.
+    CHECK(!tap.Feed(0, 0, 20, 20, 1.150));
+    CHECK(!tap.Feed(1, 0, 20, 20, 1.200));
+
+    // Outside the corner zone.
+    CHECK(!tap.Feed(0, 0, 300, 300, 2.0));
+    CHECK(!tap.Feed(1, 0, 300, 300, 2.05));
+
+    // Drag that leaves the zone is a camera gesture, not a tap.
+    CHECK(!tap.Feed(0, 0, 20, 20, 3.0));
+    CHECK(!tap.Feed(2, 0, 90, 60, 3.05));
+    CHECK(!tap.Feed(2, 0, 200, 300, 3.10));
+    CHECK(!tap.Feed(1, 0, 200, 300, 3.15));
+
+    // Long press.
+    CHECK(!tap.Feed(0, 0, 20, 20, 4.0));
+    CHECK(!tap.Feed(1, 0, 20, 20, 4.5));
+
+    // Second finger disqualifies the tap.
+    CHECK(!tap.Feed(0, 0, 20, 20, 5.0));
+    CHECK(!tap.Feed(5, 1, 400, 400, 5.01));
+    CHECK(!tap.Feed(1, 0, 20, 20, 5.05));
+
+    // A cancelled gesture never triggers.
+    CHECK(!tap.Feed(0, 0, 20, 20, 6.0));
+    CHECK(!tap.Feed(3, 0, 0, 0, 6.05));
+    CHECK(tap.TriggerCount() == 1);
+
+    // And a clean tap still works after all that.
+    CHECK(!tap.Feed(0, 0, 30, 30, 7.0));
+    CHECK(tap.Feed(1, 0, 30, 30, 7.05));
+    CHECK(tap.TriggerCount() == 2);
 }
 
 int main() {
