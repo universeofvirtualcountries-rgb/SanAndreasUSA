@@ -4,6 +4,7 @@
 
 #include "heightfield.hpp"
 #include "json.hpp"
+#include "screen_to_render.hpp"
 
 #include <string>
 
@@ -45,6 +46,7 @@ struct ModConfig {
         "https://raw.githubusercontent.com/universeofvirtualcountries-rgb/SanAndreasUSA/main/assets/missions/";
 
     // UI
+    PixelSize screenOverride; // zero pair = detect from the current render surface
     bool showOverlayOnStart = false;
     bool showTelemetry = true;
     bool verboseLog = false;

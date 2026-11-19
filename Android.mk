@@ -44,7 +44,7 @@ ifeq ($(TARGET_ARCH_ABI),armeabi-v7a)
 endif
 
 LOCAL_C_INCLUDES += $(LOCAL_PATH) $(LOCAL_PATH)/src $(LOCAL_PATH)/plugin-sdk $(LOCAL_PATH)/mod/thirdparty
-LOCAL_LDLIBS += -llog -landroid
+LOCAL_LDLIBS += -llog -landroid -lEGL -lGLESv2
 LOCAL_LDFLAGS += -Wl,--exclude-libs,ALL
 
 include $(BUILD_SHARED_LIBRARY)

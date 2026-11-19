@@ -46,9 +46,9 @@ class Coordinator {
     Handle Add(const Client &client);
     void Remove(Handle id);
     void SetRects(Handle id, const Rect *rects, uint32_t count);
-    bool ProcessTouch(int type, int finger, float x, float y, int windowWidth, int windowHeight);
+    bool ProcessTouch(int type, int finger, float x, float y);
     TouchSample LastTouch();
-    void Frame(int width, int height, float deltaTime);
+    void Frame(int width, int height, float deltaTime, int screenWidth, int screenHeight);
     void Reset();
 
   private:
@@ -65,6 +65,7 @@ class Coordinator {
     std::array<bool, 32> captured{};
     Handle nextId = 1;
     int width = 0, height = 0;
+    int screenWidth = 0, screenHeight = 0;
     TouchSample lastTouch{};
 };
 } // namespace ImGuiShared

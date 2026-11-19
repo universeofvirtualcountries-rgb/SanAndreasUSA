@@ -21,7 +21,7 @@ void ImGui_ImplRenderWare_Shutdown();
 bool ImGui_ImplRenderWare_InitRenderer();
 bool ImGui_ImplRenderWare_RenderDrawData(ImDrawData *drawData);
 
-// Cache physical display dimensions during AML's loader stage, before installing hooks.
-void ImGui_ImplRenderWare_SetScreenSize(int width, int height);
+// Optional config override set before installing hooks. Zero selects render-time detection.
+void ImGui_ImplRenderWare_SetScreenSizeOverride(int width, int height);
 ImGuiShared::TouchSample ImGui_ImplRenderWare_LastTouch();
 void ImGui_ImplRenderWare_FormatTouch(const ImGuiShared::TouchSample &sample, char *out, size_t size);

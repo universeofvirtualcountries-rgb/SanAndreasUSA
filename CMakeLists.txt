@@ -76,7 +76,7 @@ if(ANDROID)
         target_compile_options(USA1to1 PRIVATE -mfloat-abi=softfp)
     endif()
 
-    target_link_libraries(USA1to1 PRIVATE log android)
+    target_link_libraries(USA1to1 PRIVATE log android EGL GLESv2)
     # Keep libc++ and our own symbols private: other AML mods may be built with
     # a different NDK and must not interpose us.
     target_link_options(USA1to1 PRIVATE

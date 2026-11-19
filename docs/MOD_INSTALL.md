@@ -21,7 +21,7 @@ If the *Actions* tab has no `Build libUSA1to1.so` workflow yet, enable it once v
 | GTA SA **2.00** | 32-bit installs | `armeabi-v7a` |
 | GTA SA **2.10+** | 64-bit installs | `arm64-v8a` |
 
-Use **AML 1.4.0 or newer** for `GetDisplaySize()`. Newer game installs are 64-bit only; the `armeabi-v7a` library is still shipped for 2.00.
+Use **AML 1.3.0 or newer**. Newer game installs are 64-bit only; the `armeabi-v7a` library is still shipped for 2.00.
 
 ## 3. Unpack
 
@@ -100,8 +100,13 @@ full mission re-sync.
   `Overlay: ImGui RenderWare backend failed to initialise`; the mod keeps running
   headless and streaming still works.
 * **Taps miss** — look for `touch raw … -> imgui` in Telemetry / `logcat`. It
-  reports both sizes and scale factors. If a different mod owns the legacy
-  RenderWare ImGui provider, only touches captured by USA1to1 appear there.
+  reports the touch-space size, render size and scale factors. By default
+  (`ui.screen_width` and `ui.screen_height` both `0`), the backend uses the
+  EGL draw surface, a zero-origin `GL_VIEWPORT`, or `RsGlobal`, in that order.
+  If those sizes differ from Android's touch coordinates, set **both** axes
+  in `config.json` (e.g. add `"screen_width": 2400, "screen_height": 1080`
+  to the `"ui"` object) and restart the game. If another mod owns an already
+  scaling shared ImGui provider, that provider controls the mapping.
 * **Nothing spawns** — look for `Adapter: catalogue=…`, then the rejection counts
   and the first eight `ms_modelInfoPtrs` slots if the catalogue is empty. Compare
   `requested`, `loaded`, and `failed` in the `ChunkStreamer` and `TestPolygon` logs.

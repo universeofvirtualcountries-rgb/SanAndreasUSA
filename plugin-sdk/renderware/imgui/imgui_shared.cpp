@@ -39,13 +39,13 @@ void Coordinator::SetRects(Handle id, const Rect *rects, uint32_t count) {
     }
 }
 
-bool Coordinator::ProcessTouch(int type, int finger, float x, float y, int windowWidth, int windowHeight) {
+bool Coordinator::ProcessTouch(int type, int finger, float x, float y) {
     if (finger < 0 || finger >= static_cast<int>(owners.size()) || !std::isfinite(x) || !std::isfinite(y))
         return false;
     const std::lock_guard<std::mutex> lock(mutex);
-    const auto mapped = usa1to1::core::ScreenToRender(x, y, windowWidth, windowHeight, width, height);
+    const auto mapped = usa1to1::core::ScreenToRender(x, y, screenWidth, screenHeight, width, height);
     lastTouch = {x, y, mapped.x, mapped.y, mapped.scaleX, mapped.scaleY,
-                 windowWidth, windowHeight, width, height, lastTouch.sequence + 1};
+                 screenWidth, screenHeight, width, height, lastTouch.sequence + 1};
     x = mapped.x;
     y = mapped.y;
     if (type == 2) {
@@ -91,7 +91,7 @@ TouchSample Coordinator::LastTouch() {
     return lastTouch;
 }
 
-void Coordinator::Frame(int newWidth, int newHeight, float deltaTime) {
+void Coordinator::Frame(int newWidth, int newHeight, float deltaTime, int newScreenWidth, int newScreenHeight) {
     if (newWidth <= 0 || newHeight <= 0)
         return;
     std::vector<Entry> work;
@@ -99,6 +99,8 @@ void Coordinator::Frame(int newWidth, int newHeight, float deltaTime) {
         const std::lock_guard<std::mutex> lock(mutex);
         width = newWidth;
         height = newHeight;
+        screenWidth = newScreenWidth;
+        screenHeight = newScreenHeight;
         for (auto &entry : entries) {
             work.push_back({entry.id, entry.client, {}, {}, -1});
             work.back().events.swap(entry.events);
@@ -120,6 +122,7 @@ void Coordinator::Reset() {
     std::vector<Client> clients;
     {
         const std::lock_guard<std::mutex> lock(mutex);
+        width = height = screenWidth = screenHeight = 0;
         for (auto &entry : entries) {
             entry.rects.clear();
             entry.events.clear();

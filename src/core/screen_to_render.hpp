@@ -2,6 +2,18 @@
 
 namespace usa1to1::core {
 
+struct PixelSize {
+    int width = 0, height = 0;
+    constexpr bool Valid() const { return width > 0 && height > 0; }
+};
+
+// Prefer the touch space specified by the user. The window surface is a better
+// proxy than the current viewport, which may belong to a smaller render target.
+inline constexpr PixelSize ResolveTouchScreenSize(PixelSize overrideSize, PixelSize surface,
+                                                   PixelSize viewport, PixelSize render) {
+    return overrideSize.Valid() ? overrideSize : surface.Valid() ? surface : viewport.Valid() ? viewport : render;
+}
+
 struct RenderTouch {
     float x, y;
     float scaleX, scaleY;

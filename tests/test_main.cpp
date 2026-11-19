@@ -941,6 +941,39 @@ TEST(screen_to_render_falls_back_when_any_dimension_is_missing) {
     }
 }
 
+TEST(touch_screen_size_prefers_override_then_surface_and_falls_back_on_zeros) {
+    constexpr PixelSize render{1200, 540}, viewport{1600, 720}, surface{2400, 1080}, configured{3200, 1440};
+    constexpr auto manual = ResolveTouchScreenSize(configured, surface, viewport, render);
+    CHECK(manual.width == 3200 && manual.height == 1440);
+    constexpr auto autoSurface = ResolveTouchScreenSize({3200, 0}, surface, viewport, render);
+    CHECK(autoSurface.width == 2400 && autoSurface.height == 1080);
+    constexpr auto autoViewport = ResolveTouchScreenSize({}, {0, 1080}, viewport, render);
+    CHECK(autoViewport.width == 1600 && autoViewport.height == 720);
+    constexpr auto autoRender = ResolveTouchScreenSize({}, {}, {1600, -1}, render);
+    CHECK(autoRender.width == 1200 && autoRender.height == 540);
+    CHECK(!ResolveTouchScreenSize({}, {}, {}, {}).Valid());
+}
+
+TEST(config_touch_screen_override_roundtrip_and_invalid_pairs) {
+    ModConfig cfg;
+    CHECK(!cfg.screenOverride.Valid());
+    CHECK(cfg.ToJson()["ui"].GetInt("screen_width", -1) == 0);
+    CHECK(cfg.ToJson()["ui"].GetInt("screen_height", -1) == 0);
+    CHECK(cfg.FromJson(Json::Parse(R"({"ui":{"screen_width":2400,"screen_height":1080}})")));
+    const auto json = cfg.ToJson();
+    ModConfig roundtrip;
+    CHECK(roundtrip.FromJson(json));
+    CHECK(roundtrip.screenOverride.width == 2400 && roundtrip.screenOverride.height == 1080);
+    for (const char *ui : {R"({"screen_width":2400})", R"({"screen_width":2400,"screen_height":0})",
+                           R"({"screen_width":-1,"screen_height":1080})",
+                           R"({"screen_width":2400.5,"screen_height":1080})",
+                           R"({"screen_width":1e90,"screen_height":1080})"}) {
+        ModConfig invalid;
+        CHECK(invalid.FromJson(Json::Parse(std::string("{\"ui\":") + ui + "}")));
+        CHECK(invalid.screenOverride.width == 0 && invalid.screenOverride.height == 0);
+    }
+}
+
 TEST(imgui_routes_screen_pixel_tap_to_render_pixel_pill) {
     ImGuiShared::Coordinator coordinator;
     std::vector<ImGuiShared::Touch> events;
@@ -951,11 +984,11 @@ TEST(imgui_routes_screen_pixel_tap_to_render_pixel_pill) {
     }, [](void *) {}});
     const ImGuiShared::Rect pill{541.0f, 12.0f, 659.0f, 48.0f};
     coordinator.SetRects(client, &pill, 1);
-    coordinator.Frame(1200, 540, 1.0f / 60.0f);
-    CHECK(!coordinator.ProcessTouch(2, 0, 15, 15, 2400, 1080));
-    CHECK(coordinator.ProcessTouch(2, 0, 1200, 48, 2400, 1080));
-    CHECK(coordinator.ProcessTouch(1, 0, 1400, 48, 2400, 1080)); // release outside is still captured
-    coordinator.Frame(1200, 540, 1.0f / 60.0f);
+    coordinator.Frame(1200, 540, 1.0f / 60.0f, 2400, 1080);
+    CHECK(!coordinator.ProcessTouch(2, 0, 15, 15));
+    CHECK(coordinator.ProcessTouch(2, 0, 1200, 48));
+    CHECK(coordinator.ProcessTouch(1, 0, 1400, 48)); // release outside is still captured
+    coordinator.Frame(1200, 540, 1.0f / 60.0f, 2400, 1080);
     CHECK(events.size() == 2);
     if (events.size() == 2) {
         CHECK(events[0].type == 2 && events[0].x == 600.0f && events[0].y == 24.0f);
@@ -964,6 +997,21 @@ TEST(imgui_routes_screen_pixel_tap_to_render_pixel_pill) {
     const auto sample = coordinator.LastTouch();
     CHECK(sample.rawX == 1400.0f && sample.x == 700.0f && sample.scaleX == 0.5f);
     CHECK(sample.screenW == 2400 && sample.screenH == 1080 && sample.renderW == 1200 && sample.renderH == 540);
+}
+
+TEST(imgui_touch_dimensions_follow_frames_and_reset_to_raw) {
+    ImGuiShared::Coordinator coordinator;
+    CHECK(!coordinator.ProcessTouch(2, 0, 600.0f, 48.0f));
+    CHECK(coordinator.LastTouch().x == 600.0f && coordinator.LastTouch().screenW == 0);
+    coordinator.Frame(1200, 540, 1.0f / 60.0f, 2400, 1080);
+    coordinator.ProcessTouch(3, 0, 600.0f, 48.0f);
+    CHECK(coordinator.LastTouch().x == 300.0f && coordinator.LastTouch().y == 24.0f);
+    coordinator.Frame(1600, 720, 1.0f / 60.0f, 1600, 720);
+    coordinator.ProcessTouch(3, 0, 600.0f, 48.0f);
+    CHECK(coordinator.LastTouch().x == 600.0f && coordinator.LastTouch().renderW == 1600);
+    coordinator.Reset();
+    coordinator.ProcessTouch(1, 0, 600.0f, 48.0f);
+    CHECK(coordinator.LastTouch().x == 600.0f && coordinator.LastTouch().renderW == 0);
 }
 
 TEST(road_selection_uses_table_whitelist_tags_then_largest_flat_collision) {
