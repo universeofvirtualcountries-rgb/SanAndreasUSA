@@ -5,7 +5,9 @@
 #include <mod/thirdparty/imgui/imgui.h>
 #include <plugin-sdk/renderware/imgui/imgui_impl_renderware.h>
 
+#include <cstdarg>
 #include <cstdio>
+#include <string>
 
 namespace usa1to1 {
 namespace ui {
@@ -31,12 +33,12 @@ bool ImGuiOverlay::Initialize() {
         return true;
     g_overlay = this;
     if (!ImGui_ImplRenderWare_Init(&ImGuiOverlay::RenderCallback)) {
-        core::USA_LOG_E("Overlay: ImGui RenderWare backend failed to initialise");
+        USA_LOG_E("Overlay: ImGui RenderWare backend failed to initialise");
         g_overlay = nullptr;
         return false;
     }
     m_initialised = true;
-    core::USA_LOG_I("Overlay: ImGui ready (two-finger swipe down to open)");
+    USA_LOG_I("Overlay: ImGui ready (two-finger swipe down to open)");
     return true;
 }
 
