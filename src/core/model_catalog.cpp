@@ -253,7 +253,11 @@ bool IsFlatRoadCandidate(const ModelProto &p) {
     for (const char *hint : {"road", "ground", "highway", "bridge", "runway", "platform", "desert", "freeway", "carpark"})
         if (name.find(hint) != std::string::npos)
             return true;
-    // Regional filename fragments alone do not establish a walkable surface.
+    // Some canonical slab names lack a road keyword. The ID is only a hint:
+    // the live catalogue verifies static type and the dimensions above still apply.
+    for (const int id : kRoadFallbackIds)
+        if (id == p.id)
+            return !name.empty();
     return p.isRoad;
 }
 

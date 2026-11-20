@@ -83,9 +83,13 @@ class IEngineBridge {
 
     // --- streaming -----------------------------------------------------------
     virtual bool RequestModel(int modelId, bool dynamic) = 0;
+    virtual bool RequestRoadModel(int modelId) { return RequestModel(modelId, false); }
+    virtual bool IsRoadModelLoaded(int modelId) { return IsModelLoaded(modelId); }
+    virtual const char *RoadSpawnError() const { return nullptr; }
     // True when streaming and the live render/collision resources are ready for spawning.
     virtual bool IsModelLoaded(int modelId) = 0;
     virtual void ReleaseModel(int modelId) = 0;
+    virtual void ReleaseRoadModel(int modelId) { ReleaseModel(modelId); }
     // Blocking "load everything requested now". Only used at loading moments
     // (entering a door pocket, starting the test polygon), never per chunk.
     virtual void FlushModelStreaming() = 0;

@@ -92,3 +92,30 @@ class TwoFingerSwipeDetector {
 
 } // namespace core
 } // namespace usa1to1
+
+namespace usa1to1::core {
+
+struct RawMenuTouchResult {
+    bool toggle = false;
+    bool consume = false;
+};
+
+// Native GTA action codes and raw screen pixels: no ImGui or render dependency.
+class RawMenuGesture {
+  public:
+    RawMenuTouchResult Feed(int action, int finger, int x, int y, double now, bool visible, int screenW, int screenH);
+
+  private:
+    struct Finger {
+        bool down = false, dragged = false, hitbox = false;
+        int x = 0, y = 0, lastX = 0, lastY = 0;
+        double start = 0;
+    };
+    Finger m_fingers[32]{};
+    int m_active = 0;
+    bool m_multi = false, m_swiped = false;
+    int m_taps = 0;
+    double m_firstTap = 0;
+};
+
+} // namespace usa1to1::core

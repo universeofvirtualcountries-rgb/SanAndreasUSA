@@ -28,7 +28,31 @@ int64_t TestPolygon::TileIndexAt(double globalY) const {
 bool TestPolygon::Enable(const Vec2d &playerGlobal, const Vec2d &origin) {
     Disable();
     m_roadX = playerGlobal.x;
-    const auto *road = m_catalog.PickRoad(m_bridge.ProbeRoadModel());
+    m_candidates.clear();
+    if (const auto *road = m_catalog.PickRoad(m_bridge.ProbeRoadModel()))
+        m_candidates.push_back(road->id);
+    for (const int id : kRoadFallbackIds) {
+        const auto *road = m_catalog.Find(id);
+        if (road && IsFlatRoadCandidate(*road) && (m_candidates.empty() || id != m_candidates.front()))
+            m_candidates.push_back(id);
+    }
+    m_candidate = 0;
+    m_active = true;
+    m_nextRecoveryLog = m_bridge.NowSeconds();
+    SelectRoad(playerGlobal);
+    RestorePlayerHeight(origin, false);
+    Update(playerGlobal, origin);
+    return true;
+}
+
+std::string TestPolygon::StatusLine() const {
+    return "Catalog: " + std::to_string(m_catalog.Size()) + " models | RoadID: " + std::to_string(m_roadModel) +
+           " | Spawned: " + std::to_string(m_tiles.size()) + " | Err: " +
+           (!m_active ? "polygon off" : m_roadError.empty() ? "none" : m_roadError);
+}
+
+void TestPolygon::SelectRoad(const Vec2d &anchor) {
+    const auto *road = m_candidate < m_candidates.size() ? m_catalog.Find(m_candidates[m_candidate]) : nullptr;
     m_roadModel = road ? road->id : -1;
     m_tileLength = m_config.tileLength;
     m_tileHeading = 0.0f;
@@ -44,34 +68,37 @@ bool TestPolygon::Enable(const Vec2d &playerGlobal, const Vec2d &origin) {
         m_tileOffset = rotate ? Vec3f{-road->colOffset.y, road->colOffset.x, road->colOffset.z} : road->colOffset;
         m_tileOffset.z += road->colHalfExtents.z;
     }
-    m_startY = playerGlobal.y - m_tileLength * 0.5;
-    m_requested = m_roadModel >= 0 && m_bridge.RequestModel(m_roadModel, false);
-    if (m_requested)
-        m_bridge.FlushModelStreaming();
-    const bool loaded = m_requested && m_bridge.IsModelLoaded(m_roadModel);
-    m_active = true;
-    m_nextSpawnAttempt = m_nextRecoveryLog = m_bridge.NowSeconds();
-    RestorePlayerHeight(origin, false);
-    Update(playerGlobal, origin);
-    USA_LOG_I("TestPolygon: enabled at (%.1f, %.1f, %.1f), model=%d requested=%d loaded=%d failed=%d tiles=%zu",
-              playerGlobal.x, playerGlobal.y, m_config.generationZ, m_roadModel, m_requested, loaded,
-              !loaded || m_tiles.empty(), m_tiles.size());
-    if (!HasVisuals())
-        USA_LOG_W("TestPolygon: markers only (no collision tiles created)");
-    return true;
+    m_startY = anchor.y - m_tileLength * 0.5;
+    m_requested = road && m_bridge.RequestRoadModel(m_roadModel);
+    if (m_requested) {
+        m_bridge.FlushModelStreaming(); // once per candidate, outside the tile loop
+        m_roadError = "waiting for road collision";
+    } else if (const char *reason = road ? m_bridge.RoadSpawnError() : nullptr) {
+        m_roadError = reason;
+    } else {
+        m_roadError = road ? "RequestModel rejected; Add not called" : "no verified road model";
+    }
+    const double now = m_bridge.NowSeconds();
+    m_nextSpawnAttempt = now;
+    m_fallbackAt = m_requested ? now + 4.0 : now;
+    USA_LOG_I("TestPolygon: trying road model=%d (%zu/%zu)", m_roadModel, m_candidate + 1, m_candidates.size());
 }
 
-void TestPolygon::Clear() {
+void TestPolygon::ClearRoad() {
     for (auto &kv : m_tiles)
         m_bridge.DestroyObject(kv.second.handle);
     m_tiles.clear();
+    if (m_requested)
+        m_bridge.ReleaseRoadModel(m_roadModel);
+    m_requested = false;
+}
+
+void TestPolygon::Clear() {
+    ClearRoad();
     m_holdAt.reset();
     for (auto &kv : m_markers)
         m_bridge.RemoveMarker(kv.second);
     m_markers.clear();
-    if (m_requested)
-        m_bridge.ReleaseModel(m_roadModel);
-    m_requested = false;
 }
 
 void TestPolygon::Disable() {
@@ -100,10 +127,17 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
         }
     }
 
-    if (m_requested && m_bridge.IsModelLoaded(m_roadModel) && m_bridge.NowSeconds() >= m_nextSpawnAttempt) {
+    const bool modelReady = m_requested && m_bridge.IsRoadModelLoaded(m_roadModel);
+    if (m_requested && !modelReady) {
+        const char *reason = m_bridge.RoadSpawnError();
+        m_roadError = reason ? reason : "model not loaded; Add not called";
+    }
+    if (modelReady && m_bridge.NowSeconds() >= m_nextSpawnAttempt) {
         int failed = 0;
-        for (int64_t i = first; i <= last; ++i) {
-            if (m_tiles.count(i))
+        // Prioritise the only slab that can release the hold.
+        for (int64_t slot = first - 1; slot <= last; ++slot) {
+            const int64_t i = slot < first ? centre : slot;
+            if ((slot == centre) || m_tiles.count(i))
                 continue;
             const double gy = m_startY + (static_cast<double>(i) + 0.5) * m_tileLength;
             const Vec3f local{static_cast<float>(m_roadX - origin.x) - m_tileOffset.x,
@@ -123,8 +157,13 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
             tile.handle = m_bridge.CreateObject(params);
             if (tile.handle)
                 m_tiles.emplace(i, tile);
-            else
+            else {
                 ++failed;
+                if (i == centre) {
+                    const char *reason = m_bridge.RoadSpawnError();
+                    m_roadError = reason ? reason : "CreateObject failed; Add not confirmed";
+                }
+            }
         }
         if (failed) {
             m_nextSpawnAttempt = m_bridge.NowSeconds() + 2.0;
@@ -159,6 +198,7 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
     const bool collisionReady = supportingTile != m_tiles.end() &&
                                 m_bridge.IsObjectCollisionReady(supportingTile->second.handle);
     if (!collisionReady && supportingTile != m_tiles.end()) {
+        m_roadError = "Add done; supporting object lost its collider";
         m_bridge.DestroyObject(supportingTile->second.handle);
         m_tiles.erase(supportingTile);
     }
@@ -167,6 +207,14 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
                                   {static_cast<float>(target.x - origin.x), static_cast<float>(target.y - origin.y),
                                    m_config.generationZ});
     if (!supportReady) {
+        if (collisionReady) {
+            if (std::abs(target.x - m_roadX) > m_tileHalfWidth)
+                m_roadError = "player outside slab bounds";
+            else {
+                const char *reason = m_bridge.RoadSpawnError();
+                m_roadError = reason ? reason : "Add done; downward probe missed";
+            }
+        }
         if (!m_holdAt) {
             // On an actual collision miss (e.g. terrain with holes), retry from
             // the known tile centre instead of pinning outside the strip forever.
@@ -176,8 +224,19 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
             USA_LOG_I("TestPolygon: holding player until collision tile %lld is ready", static_cast<long long>(centre));
         }
         HoldPlayer(origin);
+        if (m_candidate + 1 < m_candidates.size() && m_bridge.NowSeconds() >= m_fallbackAt) {
+            const std::string previous = m_roadError;
+            USA_LOG_W("TestPolygon: retry with fallback after %s", StatusLine().c_str());
+            ClearRoad();
+            ++m_candidate;
+            SelectRoad(*m_holdAt);
+            if (m_requested)
+                m_roadError = "fallback after " + previous;
+        }
         return;
     }
+    m_roadError.clear();
+    m_fallbackAt = m_bridge.NowSeconds() + 4.0;
     if (m_holdAt) {
         HoldPlayer(origin);
         m_holdAt.reset();

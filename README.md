@@ -23,7 +23,7 @@ interiors and JSON missions while the engine only ever sees ±1000 m of local sp
 | Saves | `src/core/world_delta.*` — compact `world_delta.json` with only player state, robbed tills and owned houses |
 | Missions | `src/core/mission.*` + `assets/missions/*.json` — no recompilation needed, hot-swappable |
 | Cloud | `src/net/cloud_sync.*` + `src/net/android_http.*` — `java.net.HttpURLConnection` over JNI, manifest + hash verification, background thread |
-| UI | `src/ui/imgui_overlay.*` — Dear ImGui through AML's RenderWare backend, opened by a two-finger swipe down |
+| UI | `src/ui/imgui_overlay.*` — Dear ImGui through AML's RenderWare backend, opened by native touch shortcuts |
 | Engine bridge | `src/adapter/gtasa_adapter.*` — the only file that touches `libGTASA.so` |
 | Trust boundary | `src/core/safe.hpp` — validates every pointer/string from AML, JNI and the game image (a stale loader slot returns `0x7`, not `nullptr`) |
 | Tools | `tools/parse_ide.py` (.ide/.col → `objects_db.json`), `tools/arm_compile_check.sh`, `tools/check_source_lists.py` (every .cpp must be in CMakeLists + Android.mk) |
@@ -79,7 +79,7 @@ ZIG=/path/to/zig tools/arm_compile_check.sh
 3. Launch the game, load any save. The mod boots in two stages: loader stage
    (`OnModLoad`) and engine stage (first game tick with a live player), so a
    slow or old loader cannot crash it during startup.
-4. **Two-finger swipe down** opens the menu.
+4. **Swipe up/down with two fingers**, **triple-tap**, or tap **[USA 1:1]** to open the menu.
 
 Details: [`docs/MOD_INSTALL.md`](docs/MOD_INSTALL.md).
 Engine integration report: [`docs/ADAPTER.md`](docs/ADAPTER.md).

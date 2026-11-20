@@ -73,10 +73,11 @@ class ModApp {
     net::AndroidHttpTransport m_transport;
     std::unique_ptr<net::CloudSync> m_cloud;
     ui::ImGuiOverlay m_overlay;
-    TwoFingerSwipeDetector m_gesture;
-    std::atomic<bool> m_swipePending{false};
+    RawMenuGesture m_menuGesture;
+    std::atomic<bool> m_menuTogglePending{false};
 
     ModelCatalog m_catalog;
+    StatusFeed m_roadStatus;
     ModConfig m_config;
     std::unique_ptr<ChunkGenerator> m_generator;
     std::unique_ptr<ChunkStreamer> m_streamer;
@@ -144,8 +145,6 @@ void ModApp::OnLoad() {
     LoadConfig();
     const auto size = m_config.screenOverride;
     ImGui_ImplRenderWare_SetScreenSizeOverride(size.width, size.height);
-    if (size.Valid())
-        m_gesture.SetScreenSize(static_cast<float>(size.width), static_cast<float>(size.height));
 
     m_delta = WorldDelta::Load(m_deltaPath);
     if (m_config.startingMoney > 0 && m_delta.money == 0)
@@ -391,8 +390,10 @@ void ModApp::OnTick(double dt) {
         if (!m_runtimeReady)
             return;
     }
-    if (m_swipePending.exchange(false))
+    if (m_menuTogglePending.exchange(false)) {
         m_overlay.Toggle();
+        m_adapter.ShowToast("Touch event received");
+    }
     if (!m_adapter.IsGameReady())
         return;
     if (!m_initialSpawnDone) {
@@ -491,16 +492,17 @@ void ModApp::OnTick(double dt) {
 }
 
 bool ModApp::OnTouch(int action, int track, int x, int y) {
-    const bool consumed = m_overlay.HandleTouch(action, track, x, y);
-    // GTA's AND_TouchEvent uses 1=release, 2=press, 3=move, 4=cancel.
-    // The host-tested gesture detector takes Android MotionEvent codes.
-    constexpr int toAndroid[] = {-1, 1, 0, 2, 3};
-    if (action < 1 || action > 4)
-        return consumed;
+    const auto measured = m_overlay.TouchScreenSize();
+    const auto size = measured.Valid() ? measured : m_config.screenOverride;
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    if (m_gesture.Feed(toAndroid[action], track, x, y, now))
-        m_swipePending.store(true);
-    return consumed;
+    const auto gesture = m_menuGesture.Feed(action, track, x, y, now, m_overlay.Visible(), size.width, size.height);
+    if (gesture.toggle) {
+        // Don't deliver an UP for a recognised menu gesture as an ImGui click.
+        // Apply Toggle and publish StatusFeed on the game thread.
+        m_overlay.CancelPointer();
+        m_menuTogglePending.store(true);
+    }
+    return gesture.consume || m_overlay.HandleTouch(action, track, x, y);
 }
 
 void ModApp::UpdateTelemetry() {
@@ -531,6 +533,13 @@ void ModApp::UpdateTelemetry() {
     t.activeObjects = static_cast<int>(m_streamer->ObjectCount() + m_polygon->TileCount());
     t.streamedEntities = m_adapter.CountStreamedEntities();
     t.playerInterior = m_interiors->CurrentArea();
+
+    const std::string diagnostic = m_polygon->StatusLine();
+    if (diagnostic != m_roadStatus.LastText()) {
+        m_roadStatus.Push(diagnostic, m_adapter.NowSeconds());
+        logger->Info("%s", diagnostic.c_str());
+    }
+    model.roadStatus = m_roadStatus.LastText();
 
     std::string status;
     if (m_adapter.Status().Latest(status, m_adapter.NowSeconds()))

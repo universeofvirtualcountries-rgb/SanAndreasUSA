@@ -1045,6 +1045,56 @@ TEST(imgui_touch_dimensions_follow_frames_and_reset_to_raw) {
     CHECK(coordinator.LastTouch().x == 600.0f && coordinator.LastTouch().renderW == 0);
 }
 
+TEST(raw_menu_pill_reopens_after_close_without_imgui_and_corner_still_works) {
+    RawMenuGesture detector;
+    const auto send = [&](int action, int x, int y, double t, bool open = false) {
+        return detector.Feed(action, 4, x, y, t, open, 2400, 1080);
+    };
+    auto down = send(2, 1200, 120, 0.0);
+    CHECK(down.consume && !down.toggle);
+    auto up = send(1, 1200, 120, 0.05);
+    CHECK(up.consume && up.toggle);
+    // Close was handled by ImGui: raw input has no dependency on its mouse state.
+    CHECK(!send(2, 200, 400, 0.2, true).consume);
+    CHECK(!send(1, 200, 400, 0.22, true).toggle);
+    CHECK(send(2, 600, 0, 0.4).consume);
+    CHECK(send(1, 600, 0, 0.45).toggle);
+    CHECK(!send(2, 599, 80, 0.6).consume);
+    CHECK(!send(1, 599, 80, 0.65).toggle);
+    CHECK(send(2, 30, 30, 0.8).consume);
+    CHECK(send(1, 30, 30, 0.85).toggle);
+    CHECK(send(2, 1200, 10, 1.0).consume);
+    CHECK(send(3, 1290, 10, 1.02).consume);
+    CHECK(!send(1, 1200, 10, 1.05).toggle); // moved outside touch slop
+}
+
+TEST(raw_menu_triple_tap_and_both_swipe_directions_use_native_pixels) {
+    RawMenuGesture detector;
+    const auto send = [&](int action, int finger, int y, double t) {
+        return detector.Feed(action, finger, 300 + finger, y, t, true, 0, 0).toggle;
+    };
+    CHECK(!send(2, 5, 300, 0.0));
+    CHECK(!send(1, 5, 300, 0.05));
+    CHECK(!send(2, 5, 300, 0.25));
+    CHECK(!send(1, 5, 300, 0.30));
+    CHECK(!send(2, 5, 300, 0.55));
+    CHECK(send(1, 5, 300, 0.60)); // inclusive, no render dimensions available
+    for (int i = 0; i != 3; ++i) {
+        CHECK(!send(2, 5, 300, 1 + i * 0.31));
+        CHECK(!send(1, 5, 300, 1.05 + i * 0.31));
+    }
+    for (const int dir : {1, -1}) {
+        const double t = dir == 1 ? 3.0 : 4.0;
+        CHECK(!send(2, 3, 400, t));
+        CHECK(!send(2, 7, 410, t + 0.01));
+        CHECK(!send(3, 3, 400 + dir * 60, t + 0.02));
+        CHECK(!send(3, 7, 410 + dir * 59, t + 0.03));
+        CHECK(send(3, 7, 410 + dir * 60, t + 0.04));
+        CHECK(!send(1, 3, 400 + dir * 80, t + 0.05));
+        CHECK(!send(1, 7, 410 + dir * 80, t + 0.06));
+    }
+}
+
 TEST(open_menu_routes_raw_touch_to_real_imgui_button) {
     ImGuiContext *context = ImGui::CreateContext();
     auto &io = ImGui::GetIO();
@@ -1229,6 +1279,54 @@ TEST(polygon_holds_player_when_other_tiles_exist_but_support_is_missing) {
     bridge.hit = true;
     polygon.Update({1010, 2020}, {1200, 2000});
     CHECK(!polygon.WaitingForSupport());
+}
+
+TEST(polygon_force_requests_each_verified_candidate_once_and_reports_why_it_failed) {
+    class FallbackBridge : public test::MockBridge {
+      public:
+        std::vector<int> roadRequests;
+        bool RequestRoadModel(int id) override {
+            roadRequests.push_back(id);
+            return RequestModel(id, false);
+        }
+        bool IsRoadModelLoaded(int id) override { return id != 3001 && IsModelLoaded(id); }
+        const char *RoadSpawnError() const override { return reason; }
+        ObjectHandle CreateObject(const SpawnParams &params) override {
+            CHECK(params.roadSlab && params.collision && !params.dynamic);
+            CHECK(flushes == static_cast<int>(roadRequests.size()));
+            if (params.modelId == 3095) {
+                reason = "CObject::Create returned nullptr; Add not called";
+                return {};
+            }
+            reason = nullptr;
+            return MockBridge::CreateObject(params);
+        }
+        const char *reason = nullptr;
+    } bridge;
+    auto catalog = MakeTestCatalog();
+    bridge.roadModel = 3001;
+    for (const int id : {1225, 1271, 3095, 18450}) {
+        auto proto = *catalog.Find(3001);
+        proto.id = id;
+        catalog.Add(proto);
+        CHECK(IsFlatRoadCandidate(proto) == (id >= 3000));
+    }
+    TestPolygon polygon(bridge, catalog);
+    CHECK(polygon.Enable({}, {}));
+    CHECK(polygon.StatusLine().find("model not loaded; Add not called") != std::string::npos);
+    CHECK(polygon.WaitingForSupport() && bridge.flushes == 1);
+    bridge.now = 4.1;
+    polygon.Update({}, {});
+    CHECK(polygon.RoadModel() == 3095 && bridge.flushes == 2 && bridge.releases == 1);
+    polygon.Update({}, {});
+    CHECK(polygon.StatusLine().find("CObject::Create returned nullptr") != std::string::npos);
+    CHECK(polygon.WaitingForSupport() && polygon.TileCount() == 0);
+    bridge.now = 8.2;
+    polygon.Update({}, {});
+    polygon.Update({}, {});
+    CHECK(polygon.RoadModel() == 18450 && bridge.flushes == 3 && bridge.releases == 2);
+    CHECK(!polygon.WaitingForSupport() && polygon.TileCount() > 0);
+    CHECK(polygon.StatusLine().find("Err: none") != std::string::npos);
 }
 
 TEST(interior_defers_unready_props_and_flushes_only_once) {

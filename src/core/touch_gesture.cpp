@@ -191,3 +191,75 @@ bool TwoFingerSwipeDetector::Evaluate(double nowSeconds) {
 
 } // namespace core
 } // namespace usa1to1
+
+namespace usa1to1::core {
+
+RawMenuTouchResult RawMenuGesture::Feed(int action, int finger, int x, int y, double now,
+                                       bool visible, int screenW, int screenH) {
+    if (finger < 0 || finger >= 32 || action < 1 || action > 4)
+        return {};
+    const bool pill = screenW > 0 && screenH > 0 && x >= screenW * 0.25 && x <= screenW * 0.75 &&
+                      y >= 0 && y <= screenH * 0.12;
+    const bool corner = x >= 0 && x <= 150 && y >= 0 && y <= 64;
+    auto &f = m_fingers[finger];
+    if (action == 2) {
+        if (!f.down) {
+            if (m_active++ == 0)
+                m_multi = m_swiped = false;
+            else {
+                m_multi = true;
+                m_taps = 0;
+            }
+            f = {true, false, !visible && (pill || corner), x, y, x, y, now};
+        }
+        return {false, f.hitbox};
+    }
+    if (!f.down)
+        return {};
+    f.lastX = x;
+    f.lastY = y;
+    f.dragged |= std::hypot(double(x) - f.x, double(y) - f.y) > 24.0;
+    RawMenuTouchResult result{false, f.hitbox};
+    if ((action == 1 || action == 3) && m_active == 2 && !m_swiped) {
+        int direction = 0;
+        for (const auto &p : m_fingers) {
+            if (!p.down)
+                continue;
+            const double dy = double(p.lastY) - p.y, dx = double(p.lastX) - p.x;
+            const int d = dy >= 60.0 ? 1 : dy <= -60.0 ? -1 : 0;
+            if (!d || (direction && direction != d) || std::abs(dx) >= std::abs(dy) || now - p.start > 0.8) {
+                direction = 0;
+                break;
+            }
+            direction = d;
+        }
+        if (direction) {
+            m_swiped = true;
+            result.toggle = true;
+        }
+    }
+    if (action == 1 || action == 4) {
+        const bool tap = action == 1 && !m_multi && !f.dragged && now - f.start <= 0.3;
+        if (tap && f.hitbox && (pill || corner)) {
+            if (!visible)
+                result.toggle = true;
+            m_taps = 0; // never count the same opening tap toward another toggle
+        } else if (tap) {
+            if (!m_taps || now - m_firstTap > 0.600 + 1e-9) {
+                m_taps = 0;
+                m_firstTap = f.start;
+            }
+            if (++m_taps == 3) {
+                result.toggle = now - m_firstTap <= 0.600 + 1e-9;
+                m_taps = 0;
+            }
+        } else {
+            m_taps = 0;
+        }
+        f = {};
+        --m_active;
+    }
+    return result;
+}
+
+} // namespace usa1to1::core

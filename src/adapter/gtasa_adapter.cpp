@@ -11,6 +11,7 @@
 #include <plugin-sdk/game_sa/base/Matrix.h>
 #include <plugin-sdk/game_sa/base/Timer.h>
 #include <plugin-sdk/game_sa/engine/Cam.h>
+#include <plugin-sdk/game_sa/engine/ColStore.h>
 #include <plugin-sdk/game_sa/engine/Game.h>
 #include <plugin-sdk/game_sa/engine/Markers.h>
 #include <plugin-sdk/game_sa/engine/ModelInfo.h>
@@ -22,6 +23,7 @@
 #include <plugin-sdk/game_sa/entity/Vehicle.h>
 #include <plugin-sdk/game_sa/other/Pools.h>
 #include <plugin-sdk/renderware/RwObject.h>
+#include <plugin-sdk/renderware/RwFrame.h>
 
 #include <mod/amlmod.h>
 
@@ -37,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <unordered_set>
 
 using namespace usa1to1::core;
@@ -171,6 +174,9 @@ bool GTASAAdapter::VerifyEngineSymbols() {
     m_syms.worldRemove = Symbol("_ZN6CWorld6RemoveEP7CEntity") != nullptr;
     m_createObject = reinterpret_cast<decltype(m_createObject)>(Symbol("_ZN7CObject6CreateEib"));
     m_createRwObject = reinterpret_cast<decltype(m_createRwObject)>(Symbol("_ZN7CEntity14CreateRwObjectEv"));
+    m_updateRwMatrix = reinterpret_cast<decltype(m_updateRwMatrix)>(Symbol("_ZN7CEntity14UpdateRwMatrixEv"));
+    m_addColRef = reinterpret_cast<decltype(m_addColRef)>(Symbol("_ZN9CColStore6AddRefEi"));
+    m_removeColRef = reinterpret_cast<decltype(m_removeColRef)>(Symbol("_ZN9CColStore9RemoveRefEi"));
     m_processVerticalLine = reinterpret_cast<decltype(m_processVerticalLine)>(
         Symbol("_ZN6CWorld19ProcessVerticalLineERK7CVectorfR9CColPointRP7CEntitybbbbbbP15CStoredCollPoly"));
     if (!m_processVerticalLine)
@@ -337,6 +343,8 @@ void GTASAAdapter::Shutdown() {
     for (uintptr_t p : owned)
         DestroyObject(ObjectHandle{p});
     m_markers.clear();
+    if (m_requiredRoadModel >= 0)
+        ReleaseRoadModel(m_requiredRoadModel);
 
     // Hide our marker slots.
     for (int i = 0; i < kMarkerSlots; ++i) {
@@ -687,7 +695,7 @@ bool GTASAAdapter::IsModelLoaded(int modelId) {
 }
 
 void GTASAAdapter::ReleaseModel(int modelId) {
-    if (!m_runtimeReady || !m_syms.streaming || !m_syms.releaseModel)
+    if (modelId == m_requiredRoadModel || !m_runtimeReady || !m_syms.streaming || !m_syms.releaseModel)
         return;
     if (modelId < 0 || modelId >= ModelScanLimit() || !CStreaming::IsInitialised())
         return;
@@ -730,26 +738,113 @@ static bool HasRoadSurface(const CBaseModelInfo *info) {
     return data->m_nNumBoxes > 0 || data->m_nNumTriangles > 0;
 }
 
+static const ColDef *LiveCollisionSlot(uintptr_t gameBase, int slot, int modelId) {
+    // Read the live GOT entry (also used by the SDK), not a guessed streaming
+    // file ID. FLA can relocate the COL pool and change file-ID boundaries.
+    auto ***entry = reinterpret_cast<CColPool ***>(gameBase + BYBIT(0x679660, 0x850CD0));
+    if (slot <= 0 || !IsMappedRange(entry, sizeof(*entry)) || !IsMappedRange(*entry, sizeof(**entry)))
+        return nullptr;
+    const auto *pool = **entry;
+    if (!IsMappedRange(pool, sizeof(*pool)) || slot >= pool->m_nSize ||
+        !IsSanePointer(pool->m_byteMap) || !IsSanePointer(pool->m_pObjects))
+        return nullptr;
+    const auto *flag = pool->m_byteMap + slot;
+    const auto *def = pool->m_pObjects + slot;
+    if (!IsMappedRange(flag, sizeof(*flag)) || flag->bEmpty || !IsMappedRange(def, sizeof(*def)) ||
+        modelId < def->m_nModelIdStart || modelId > def->m_nModelIdEnd)
+        return nullptr;
+    return def;
+}
+
+void GTASAAdapter::ReleaseRoadModel(int id) {
+    if (id != m_requiredRoadModel)
+        return;
+    if (m_roadColDef && LiveCollisionSlot(m_gameBase, m_roadColSlot, id) == m_roadColDef &&
+        m_roadColDef->m_nRefCount > 0)
+        m_removeColRef(m_roadColSlot);
+    m_roadColDef = nullptr;
+    m_roadColSlot = -1;
+    m_requiredRoadModel = -1;
+    ReleaseModel(id);
+}
+
+bool GTASAAdapter::RequestRoadModel(int id) {
+    if (!IsRoadSlabId(id) || id >= ModelScanLimit() || !LiveModelInfo(id) || !LiveStreamingInfo(m_gameBase, id)) {
+        m_roadSpawnError = "invalid live road model/streaming slot";
+        return false;
+    }
+    if (!m_runtimeReady || !m_syms.streaming || !m_syms.requestModel || !CStreaming::IsInitialised()) {
+        m_roadSpawnError = "RequestModel unavailable";
+        return false;
+    }
+    if (!m_syms.flushModels) {
+        m_roadSpawnError = "LoadAllRequestedModels unavailable";
+        return false;
+    }
+    const auto *info = LiveModelInfo(id);
+    const auto *col = info->m_pColModel;
+    // DFF loading alone doesn't keep the geographically streamed COL loaded at
+    // the polygon's new coordinates. Pin the matching native COL slot when it
+    // can be verified; the game's collision streaming will load/retain it.
+    if (m_addColRef && m_removeColRef && IsMappedRange(col, sizeof(*col))) {
+        const int slot = col->m_nColSlot;
+        const auto *def = LiveCollisionSlot(m_gameBase, slot, id);
+        if (def && def->m_nRefCount >= 0 && def->m_nRefCount < std::numeric_limits<int16_t>::max()) {
+            m_addColRef(slot);
+            m_roadColSlot = slot;
+            m_roadColDef = def;
+        }
+    }
+    m_requiredRoadModel = id;
+    CStreaming::RequestModel(id, 2); // game-required until the polygon releases this candidate
+    m_roadSpawnError = nullptr;
+    return true;
+}
+
+bool GTASAAdapter::IsRoadModelLoaded(int id) {
+    const auto *entry = m_runtimeReady && IsRoadSlabId(id) && id < ModelScanLimit()
+                            ? LiveStreamingInfo(m_gameBase, id) : nullptr;
+    if (!entry || entry->m_status != 1)
+        m_roadSpawnError = "model not loaded after RequestModel/flush";
+    else if (!HasMappedModelResources(LiveModelInfo(id)))
+        m_roadSpawnError = "loaded model missing RW or COL";
+    else if (!HasRoadSurface(LiveModelInfo(id)))
+        m_roadSpawnError = "loaded COL missing boxes/triangles";
+    else {
+        m_roadSpawnError = nullptr;
+        return true;
+    }
+    return false;
+}
+
 ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     const int id = params.modelId;
-    if (!m_syms.objectCreate || !m_syms.worldAdd || !m_syms.worldRemove ||
-        id < 0 || id >= ModelScanLimit() || (params.roadSlab && !IsRoadSlabId(id)))
+    const auto fail = [&](const char *reason) -> ObjectHandle {
+        if (params.roadSlab)
+            m_roadSpawnError = reason;
+        LogUnreadyModel(id, reason);
         return {};
-    // No synchronous flush here: the caller keeps the request pending across
-    // ticks. A loaded streaming slot alone is not sufficient to construct it.
-    if (!IsModelLoaded(id) || (params.roadSlab && !HasRoadSurface(LiveModelInfo(id)))) {
-        LogUnreadyModel(id, "not ready for CObject::Create");
-        return {};
+    };
+    if (!m_syms.objectCreate || !m_syms.worldAdd || !m_syms.worldRemove)
+        return fail("Create/Add/Remove unavailable; Add not called");
+    if (id < 0 || id >= ModelScanLimit() || (params.roadSlab && !IsRoadSlabId(id)))
+        return fail("invalid model ID; Add not called");
+    if (params.roadSlab) {
+        if (m_requiredRoadModel != id)
+            return fail("road model not requested; Add not called");
+        if (!IsRoadModelLoaded(id))
+            return {}; // already has a precise reason; Add not called
+    } else if (!IsModelLoaded(id)) {
+        return fail("not ready for CObject::Create");
     }
 
-    CObject *obj = m_createObject(id, false);
+    CObject *obj = params.roadSlab ? m_createObject(id, true) : m_createObject(id, false);
     if (!obj)
-        return {};
+        return fail("CObject::Create returned nullptr; Add not called");
 
     if (!IsMappedRange(obj, sizeof(*obj)) || obj->m_nModelIndex != id) {
-        LogUnreadyModel(id, "unmapped CObject or unexpected model index after Create");
         DeletePoolObject(obj, false);
-        return {};
+        return fail("invalid instance/model index after Create; Add not called");
     }
 
     obj->bIsStatic = !params.dynamic;
@@ -767,9 +862,28 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     if (!obj->m_pRwObject && m_createRwObject && HasMappedModelResources(LiveModelInfo(id)))
         m_createRwObject(obj);
     if (!HasMappedObjectInstance(obj)) {
-        LogUnreadyModel(id, "CObject has no mapped RwObject after factory/instantiation");
         DeletePoolObject(obj, false);
-        return {};
+        return fail("missing instance RW after Create; Add not called");
+    }
+    if (params.roadSlab) {
+        auto *frame = static_cast<RwFrame *>(obj->m_pRwObject->parent);
+        if (!IsMappedRange(frame, sizeof(*frame))) {
+            DeletePoolObject(obj, false);
+            return fail("missing RW frame; Add not called");
+        }
+        // With Create(true), RW may have been instantiated before we set the
+        // entity pose. UpdateRwFrame propagates the matrix; it doesn't copy it.
+        if (m_updateRwMatrix)
+            m_updateRwMatrix(obj);
+        else {
+            const float c = std::cos(params.headingRad), s = std::sin(params.headingRad);
+            auto &m = frame->modelling;
+            m.right = {c, s, 0.0f};
+            m.up = {-s, c, 0.0f};
+            m.at = {0.0f, 0.0f, 1.0f};
+            m.pos = {params.pos.x, params.pos.y, params.pos.z};
+            m.flags = (m.flags & ~(rwMATRIXINTERNALIDENTITY | rwMATRIXTYPEMASK)) | rwMATRIXTYPEORTHONORMAL;
+        }
     }
     obj->UpdateRwFrame();
 
@@ -778,9 +892,8 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     const auto *live = LiveModelInfo(id);
     if (!HasMappedObjectInstance(obj) ||
         !(params.roadSlab ? HasRoadSurface(live) : HasMappedModelResources(live))) {
-        LogUnreadyModel(id, "model or instance resources missing before CWorld::Add");
         DeletePoolObject(obj, false);
-        return {};
+        return fail("model or instance resources missing; Add not called");
     }
     CWorld::Add(obj);
 
@@ -813,14 +926,24 @@ bool GTASAAdapter::IsObjectCollisionReady(ObjectHandle handle) {
 }
 
 bool GTASAAdapter::HasRoadSupportAt(ObjectHandle handle, const Vec3f &surface) {
-    if (!m_processVerticalLine)
+    if (!m_processVerticalLine) {
+        m_roadSpawnError = "Add done; collision query unavailable";
         return false;
+    }
     CColPoint hit{};
     CEntity *entity = nullptr;
     const CVector start(surface.x, surface.y, surface.z + 1.5f);
-    return m_processVerticalLine(start, surface.z - 3.0f, hit, entity,
-                                 false, false, false, true, false, false, nullptr) &&
-           entity == reinterpret_cast<CEntity *>(handle.raw) && hit.GetNormal().z > 0.5f;
+    if (!m_processVerticalLine(start, surface.z - 3.0f, hit, entity,
+                              false, false, false, true, false, false, nullptr)) {
+        m_roadSpawnError = "Add done; downward probe missed";
+        return false;
+    }
+    if (entity != reinterpret_cast<CEntity *>(handle.raw) || hit.GetNormal().z <= 0.5f) {
+        m_roadSpawnError = "Add done; probe hit another object or steep surface";
+        return false;
+    }
+    m_roadSpawnError = nullptr;
+    return true;
 }
 
 void GTASAAdapter::DestroyObject(ObjectHandle handle) {
@@ -1226,6 +1349,16 @@ int GTASAAdapter::BuildLiveCatalog(ModelCatalog &out, const std::string &assetDi
                 numericCount += numeric && models.size() != before;
             }
         }
+    }
+
+    // Stock IDs are candidates, not trusted metadata. In particular 18450 is
+    // an explicit exception, not an expansion of the generic numeric scan.
+    for (const int id : kRoadFallbackIds) {
+        if (ids.count(id))
+            continue;
+        ModelProto p;
+        if (describe(id, LiveModelInfo(id), nullptr, p) && IsFlatRoadCandidate(p))
+            add(std::move(p));
     }
 
     out.Clear();

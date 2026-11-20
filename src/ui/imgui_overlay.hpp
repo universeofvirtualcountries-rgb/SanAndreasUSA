@@ -39,6 +39,7 @@ struct OverlayModel {
     std::string missionLabel;
     std::string cloudLabel;
     std::string saveLabel;
+    std::string roadStatus;         // persistent road status feed channel
     std::string statusLine;         // last ShowToast() message, rendered in-menu
     double statusAgeSec = 1e9;      // for the transient banner
     bool polygonActive = false;
@@ -64,6 +65,8 @@ class ImGuiOverlay {
     void SetMissions(const core::MissionManager *missions, const core::WorldDelta *delta);
 
     void Toggle();
+    core::PixelSize TouchScreenSize() const;
+    void CancelPointer() { m_touches.CancelPointer(); }
     bool HandleTouch(int action, int track, int x, int y);
     // Corner button drawn even while the menu is closed.
     void DrawCornerButton();
@@ -85,6 +88,7 @@ class ImGuiOverlay {
     const core::WorldDelta *m_delta = nullptr;
     std::atomic<bool> m_visible{false};
     std::atomic<bool> m_inputReady{false};
+    std::atomic<uint32_t> m_touchScreen{0}; // two 16-bit dimensions, from one frame
     core::MenuTouchQueue m_touches;
     core::StatusFeed m_tapStatus; // render-thread diagnostic, independent of game time and gameplay notifications
     std::optional<core::MenuTouch> m_tap;

@@ -49,13 +49,16 @@ Grant storage permission to the game, otherwise the mod cannot write
 1. Launch GTA SA through AML, load a save.
 2. The mod teleports you to **Los Angeles** on the 1:1 plane (configurable:
    `content.spawn_city` in `config.json`).
-3. Open the overlay with a **two-finger swipe down** anywhere, or tap the small
-   semi-transparent **[USA 1:1]** pill at the top center (tap again to close).
+3. Toggle the overlay with **three quick taps** (≤600 ms) or a **two-finger
+   swipe up or down** (60 screen pixels). When closed, you can also tap the
+   **[USA 1:1]** pill at top centre or the top-left shortcut. These shortcuts
+   do not depend on ImGui mouse input.
 4. `Polygon` tab → *Start polygon* spawns the endless road with a yellow marker
    every 200 m at `content.generation_z` (300 m by default, clamped to 50–900).
    You start 2 m above a ready road; if the tile underneath is missing, the
    mod pins you at `generation_z + 1.5` until its collision is ready. Drive
-   it and watch `Origin shifts` in Telemetry.
+   it and watch `Origin shifts` in Telemetry. The banner and Telemetry show
+   `Catalog: … | RoadID: … | Spawned: … | Err: …`.
 5. `Teleports` tab → jump to New York / Washington / Las Vegas / Los Angeles.
 6. `Missions` tab → start a JSON mission. The state is saved in `world_delta.json`.
 7. Short status messages ("Entering shop...", "Mission complete", "+$2500")
@@ -103,15 +106,15 @@ full mission re-sync.
   headless and streaming still works.
 * **Taps miss** — open the menu and tap: the top status line and `logcat` show
   `Tap raw=(x,y) -> imgui=(ix,iy) hovered=...`. The `touch raw … -> imgui`
-  line in Telemetry describes the shared hit-test path (e.g. the closed pill). It
-  reports the touch-space size, render size and scale factors. By default
+  line in Telemetry describes the shared input path. Use the `Touch event
+  received` message to confirm a raw shortcut fired. By default
   (`ui.screen_width` and `ui.screen_height` both `0`), the backend uses the
   EGL draw surface, a zero-origin `GL_VIEWPORT`, or `RsGlobal`, in that order.
   If those sizes differ from Android's touch coordinates, set **both** axes
   in `config.json` (e.g. add `"screen_width": 2400, "screen_height": 1080`
-  to the `"ui"` object) and restart the game. An older shared ImGui provider
-  installed by another mod may still control hit-testing for the closed pill.
-* **Nothing spawns** — look for `Adapter: catalogue=…`, then the rejection counts
+  to the `"ui"` object) and restart the game.
+* **Nothing spawns** — first note the `Catalog: … | RoadID: … | Spawned: … | Err: …`
+  banner. In the log, look for `Adapter: catalogue=…`, then the rejection counts
   and the first eight `ms_modelInfoPtrs` slots if the catalogue is empty. Compare
   `requested`, `loaded`, and `failed` in the `ChunkStreamer` and `TestPolygon` logs.
   Keep `content.model_id_limit` at the actual table size (stock default 20000,

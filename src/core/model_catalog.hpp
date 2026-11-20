@@ -45,7 +45,8 @@ struct ModelProto {
 };
 
 // A road must support a player, not just have a large bounding sphere.
-inline constexpr bool IsRoadSlabId(int id) { return id >= 3000 && id <= 18000; }
+inline constexpr int kRoadFallbackIds[] = {3095, 8558, 6959, 18450};
+inline constexpr bool IsRoadSlabId(int id) { return (id >= 3000 && id <= 18000) || id == 18450; }
 bool IsFlatRoadCandidate(const ModelProto &proto);
 
 class ModelCatalog {
