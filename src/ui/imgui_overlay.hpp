@@ -4,10 +4,14 @@
 #pragma once
 
 #include "core/engine_bridge.hpp"
+#include "core/menu_touch.hpp"
+#include "core/screen_to_render.hpp"
+#include "core/status_feed.hpp"
 #include "core/mission.hpp"
 #include "core/regions.hpp"
 #include "core/world_delta.hpp"
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -60,9 +64,10 @@ class ImGuiOverlay {
     void SetMissions(const core::MissionManager *missions, const core::WorldDelta *delta);
 
     void Toggle();
+    bool HandleTouch(int action, int track, int x, int y);
     // Corner button drawn even while the menu is closed.
     void DrawCornerButton();
-    void SetVisible(bool visible) { m_visible = visible; }
+    void SetVisible(bool visible);
     bool Visible() const { return m_visible; }
     size_t ToggleCount() const { return m_toggleCount; }
 
@@ -71,12 +76,19 @@ class ImGuiOverlay {
 
   private:
     static void RenderCallback();
+    static void InputCallback(int screenW, int screenH, int renderW, int renderH);
+    void DrawTapStatus();
 
     OverlayActions m_actions;
     OverlayModel m_model;
     const core::MissionManager *m_missions = nullptr;
     const core::WorldDelta *m_delta = nullptr;
-    bool m_visible = false;
+    std::atomic<bool> m_visible{false};
+    std::atomic<bool> m_inputReady{false};
+    core::MenuTouchQueue m_touches;
+    core::StatusFeed m_tapStatus; // render-thread diagnostic, independent of game time and gameplay notifications
+    std::optional<core::MenuTouch> m_tap;
+    core::RenderTouch m_tapMapped{};
     bool m_initialised = false;
     size_t m_toggleCount = 0;
     int m_selectedTab = 0;

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace usa1to1 {
@@ -49,12 +50,14 @@ class TestPolygon {
 
     size_t TileCount() const { return m_tiles.size(); }
     size_t MarkerCount() const { return m_markers.size(); }
+    bool WaitingForSupport() const { return m_holdAt.has_value(); }
     bool HasVisuals() const { return !m_tiles.empty(); }
     int RoadModel() const { return m_roadModel; }
     int64_t TileIndexAt(double globalY) const;
 
   private:
     void Clear();
+    void HoldPlayer(const Vec2d &origin);
     void RestorePlayerHeight(const Vec2d &origin, bool recenter);
 
     IEngineBridge &m_bridge;
@@ -65,6 +68,8 @@ class TestPolygon {
     bool m_requested = false;
     float m_tileHeading = 0.0f;
     double m_tileLength = 20.0;
+    float m_tileHalfWidth = 0.0f;
+    std::optional<Vec2d> m_holdAt;
     Vec3f m_tileOffset;
     double m_nextSpawnAttempt = 0.0;
     double m_nextRecoveryLog = 0.0;

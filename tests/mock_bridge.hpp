@@ -81,6 +81,7 @@ class MockBridge : public core::IEngineBridge {
         return true;
     }
     void SetPlayerPosition(const core::Vec3f &pos) override { player = pos; }
+    void HoldPlayerPosition(const core::Vec3f &pos) override { player = pos; playerVelocity = {}; }
     bool IsPlayerInVehicle() override { return playerInVehicle; }
     float GetFps() override { return fps; }
 

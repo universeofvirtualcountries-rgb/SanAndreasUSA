@@ -65,8 +65,8 @@ void HookGameProcess() {
 }
 
 void HookTouchEvent(int action, int track, int x, int y) {
-    if (g_adapter)
-        g_adapter->OnTouch(action, track, x, y);
+    if (g_adapter && g_adapter->OnTouch(action, track, x, y))
+        return;
     if (g_origTouchEvent)
         g_origTouchEvent(action, track, x, y);
 }
@@ -169,7 +169,13 @@ bool GTASAAdapter::VerifyEngineSymbols() {
     m_syms.flushModels = Symbol("_ZN10CStreaming22LoadAllRequestedModelsEb") != nullptr;
     m_syms.worldAdd = Symbol("_ZN6CWorld3AddEP7CEntity") != nullptr;
     m_syms.worldRemove = Symbol("_ZN6CWorld6RemoveEP7CEntity") != nullptr;
-    m_syms.objectCreate = Symbol("_ZN7CObject6CreateEib") && Symbol("_ZN7CObjectD2Ev");
+    m_createObject = reinterpret_cast<decltype(m_createObject)>(Symbol("_ZN7CObject6CreateEib"));
+    m_createRwObject = reinterpret_cast<decltype(m_createRwObject)>(Symbol("_ZN7CEntity14CreateRwObjectEv"));
+    m_processVerticalLine = reinterpret_cast<decltype(m_processVerticalLine)>(
+        Symbol("_ZN6CWorld19ProcessVerticalLineERK7CVectorfR9CColPointRP7CEntitybbbbbbP15CStoredCollPoly"));
+    if (!m_processVerticalLine)
+        USA_LOG_W("Adapter: no CWorld::ProcessVerticalLine; the polygon cannot confirm road support");
+    m_syms.objectCreate = m_createObject && Symbol("_ZN7CObjectD2Ev");
     m_exportedModelTable = static_cast<CBaseModelInfo **>(Symbol("_ZN10CModelInfo16ms_modelInfoPtrsE"));
     m_modelByName = Symbol("_ZN10CModelInfo12GetModelInfoEPKcPi");
     m_syms.modelInfo = m_modelByName != nullptr;
@@ -270,6 +276,10 @@ void GTASAAdapter::InstallHooks() {
 
     auto hookSym = [this](const char *sym, void *replacement, void **original, const char *label) -> bool {
         void *addr = reinterpret_cast<void *>(aml->GetSym(m_libHandle, sym));
+#ifndef AML64
+        if (!addr && std::strcmp(sym, "_Z14AND_TouchEventiiii") == 0)
+            addr = reinterpret_cast<void *>(m_gameBase + 0x2697C0); // stock 2.00 fallback
+#endif
         if (!core::IsSaneHandle(addr)) {
             USA_LOG_W("Adapter: symbol %s (%s) not exported by this build (%s)", sym, label,
                       core::HexPointer(addr).c_str());
@@ -364,9 +374,8 @@ void GTASAAdapter::OnGameProcess() {
         m_onTick(dt);
 }
 
-void GTASAAdapter::OnTouch(int action, int track, int x, int y) {
-    if (m_onTouch)
-        m_onTouch(action, track, x, y);
+bool GTASAAdapter::OnTouch(int action, int track, int x, int y) {
+    return m_onTouch && m_onTouch(action, track, x, y);
 }
 
 void GTASAAdapter::OnGameShutdown() {
@@ -431,6 +440,20 @@ void GTASAAdapter::RecoverPlayerPosition(const Vec3f &pos) {
     if (auto *ped = FindPlayerPed(0))
         ped->m_vecMoveSpeed.z = 0.0f;
     ShiftCamera(delta);
+}
+
+void GTASAAdapter::HoldPlayerPosition(const Vec3f &pos) {
+    RecoverPlayerPosition(pos);
+    auto stop = [](CPhysical *body) {
+        if (body) {
+            body->m_vecMoveSpeed = CVector(0.0f, 0.0f, 0.0f);
+            body->m_vecFrictionMoveSpeed = CVector(0.0f, 0.0f, 0.0f);
+        }
+    };
+    if (m_runtimeReady && m_syms.findPlayer)
+        stop(FindPlayerPed(0));
+    if (m_runtimeReady && m_syms.findVehicle)
+        stop(FindPlayerVehicle(0, false));
 }
 
 bool GTASAAdapter::IsPlayerInVehicle() {
@@ -693,24 +716,38 @@ void GTASAAdapter::LogUnreadyModel(int modelId, const char *reason) {
     }
 }
 
+static bool HasRoadSurface(const CBaseModelInfo *info) {
+    if (!HasMappedModelResources(info))
+        return false;
+    const auto *data = info->m_pColModel->m_pColData;
+    if (!IsMappedRange(data, sizeof(*data)))
+        return false;
+    if (data->m_nNumBoxes > 0 && !IsMappedRange(data->m_pBoxes, sizeof(*data->m_pBoxes) * data->m_nNumBoxes))
+        return false;
+    if (data->m_nNumTriangles > 0 && (!IsMappedRange(data->m_pVertices, sizeof(*data->m_pVertices)) ||
+                                    !IsMappedRange(data->m_pTriangles, sizeof(*data->m_pTriangles) * data->m_nNumTriangles)))
+        return false;
+    return data->m_nNumBoxes > 0 || data->m_nNumTriangles > 0;
+}
+
 ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     const int id = params.modelId;
     if (!m_syms.objectCreate || !m_syms.worldAdd || !m_syms.worldRemove ||
-        id < 0 || id >= ModelScanLimit())
+        id < 0 || id >= ModelScanLimit() || (params.roadSlab && !IsRoadSlabId(id)))
         return {};
     // No synchronous flush here: the caller keeps the request pending across
     // ticks. A loaded streaming slot alone is not sufficient to construct it.
-    if (!IsModelLoaded(id)) {
+    if (!IsModelLoaded(id) || (params.roadSlab && !HasRoadSurface(LiveModelInfo(id)))) {
         LogUnreadyModel(id, "not ready for CObject::Create");
         return {};
     }
 
-    CObject *obj = CObject::Create(id, true);
+    CObject *obj = m_createObject(id, false);
     if (!obj)
         return {};
 
-    if (!HasMappedObjectInstance(obj) || obj->m_nModelIndex != id) {
-        LogUnreadyModel(id, "CObject has no mapped RwObject or unexpected model index after Create");
+    if (!IsMappedRange(obj, sizeof(*obj)) || obj->m_nModelIndex != id) {
+        LogUnreadyModel(id, "unmapped CObject or unexpected model index after Create");
         DeletePoolObject(obj, false);
         return {};
     }
@@ -725,11 +762,22 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     else
         obj->m_placement.m_fHeading = params.headingRad;
     obj->GetPosition() = ToCV(params.pos);
+    // Some builds leave the instance RW object empty when the factory flag is
+    // false. Instantiate it explicitly, never insert a collision-only shell.
+    if (!obj->m_pRwObject && m_createRwObject && HasMappedModelResources(LiveModelInfo(id)))
+        m_createRwObject(obj);
+    if (!HasMappedObjectInstance(obj)) {
+        LogUnreadyModel(id, "CObject has no mapped RwObject after factory/instantiation");
+        DeletePoolObject(obj, false);
+        return {};
+    }
     obj->UpdateRwFrame();
 
     // Look up the live slot again: neither a catalogue-time COL nor a
     // successful Create proves both model and instance are safe for Add.
-    if (!HasMappedModelResources(LiveModelInfo(id)) || !HasMappedObjectInstance(obj)) {
+    const auto *live = LiveModelInfo(id);
+    if (!HasMappedObjectInstance(obj) ||
+        !(params.roadSlab ? HasRoadSurface(live) : HasMappedModelResources(live))) {
         LogUnreadyModel(id, "model or instance resources missing before CWorld::Add");
         DeletePoolObject(obj, false);
         return {};
@@ -754,10 +802,36 @@ void GTASAAdapter::DeletePoolObject(CObject *obj, bool inWorld) {
     pool->Delete(obj);
 }
 
+bool GTASAAdapter::IsObjectCollisionReady(ObjectHandle handle) {
+    const auto it = m_owned.find(handle.raw);
+    if (it == m_owned.end())
+        return false;
+    auto *obj = reinterpret_cast<CObject *>(handle.raw);
+    auto *pool = CPools::ms_pObjectPool;
+    return pool && pool->IsObjectValid(obj) && HasMappedObjectInstance(obj) && obj->bUsesCollision &&
+           obj->m_nModelIndex == it->second.modelId && HasRoadSurface(LiveModelInfo(it->second.modelId));
+}
+
+bool GTASAAdapter::HasRoadSupportAt(ObjectHandle handle, const Vec3f &surface) {
+    if (!m_processVerticalLine)
+        return false;
+    CColPoint hit{};
+    CEntity *entity = nullptr;
+    const CVector start(surface.x, surface.y, surface.z + 1.5f);
+    return m_processVerticalLine(start, surface.z - 3.0f, hit, entity,
+                                 false, false, false, true, false, false, nullptr) &&
+           entity == reinterpret_cast<CEntity *>(handle.raw) && hit.GetNormal().z > 0.5f;
+}
+
 void GTASAAdapter::DestroyObject(ObjectHandle handle) {
-    if (!m_owned.erase(handle.raw))
+    const auto it = m_owned.find(handle.raw);
+    if (it == m_owned.end())
         return;
-    DeletePoolObject(reinterpret_cast<CObject *>(handle.raw), true);
+    const int id = it->second.modelId;
+    m_owned.erase(it);
+    auto *obj = reinterpret_cast<CObject *>(handle.raw);
+    if (IsMappedRange(obj, sizeof(*obj)) && obj->m_nModelIndex == id)
+        DeletePoolObject(obj, true);
     // Streaming requests are released by their chunk / polygon / interior owner.
 }
 

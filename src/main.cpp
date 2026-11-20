@@ -51,7 +51,7 @@ class ModApp {
     void OnAllModsLoaded();
     void OnUnload();
     void OnTick(double dt);
-    void OnTouch(int action, int track, int x, int y);
+    bool OnTouch(int action, int track, int x, int y);
     void OnGameCrash(const char *library, int sig, int code, uintptr_t libaddr);
 
   private:
@@ -155,7 +155,7 @@ void ModApp::OnLoad() {
     m_overlay.SetMissions(&m_missions, &m_delta);
 
     m_adapter.SetTickCallback([this](double dt) { OnTick(dt); });
-    m_adapter.SetTouchCallback([this](int a, int t, int x, int y) { OnTouch(a, t, x, y); });
+    m_adapter.SetTouchCallback([this](int a, int t, int x, int y) { return OnTouch(a, t, x, y); });
     m_adapter.SetShutdownCallback([this]() { OnUnload(); });
 
     EnsureLoaderStage();
@@ -490,15 +490,17 @@ void ModApp::OnTick(double dt) {
     UpdateTelemetry();
 }
 
-void ModApp::OnTouch(int action, int track, int x, int y) {
+bool ModApp::OnTouch(int action, int track, int x, int y) {
+    const bool consumed = m_overlay.HandleTouch(action, track, x, y);
     // GTA's AND_TouchEvent uses 1=release, 2=press, 3=move, 4=cancel.
     // The host-tested gesture detector takes Android MotionEvent codes.
     constexpr int toAndroid[] = {-1, 1, 0, 2, 3};
     if (action < 1 || action > 4)
-        return;
+        return consumed;
     const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (m_gesture.Feed(toAndroid[action], track, x, y, now))
         m_swipePending.store(true);
+    return consumed;
 }
 
 void ModApp::UpdateTelemetry() {
@@ -630,7 +632,7 @@ void ModApp::TogglePolygon() {
     if (!m_adapter.GetPlayerPosition(local))
         return;
     m_polygon->Enable(m_origin.ToGlobal(local), m_origin.Offset());
-    m_adapter.ShowToast(m_polygon->HasVisuals() ? "Test polygon ON" : "Test polygon ON (markers only)");
+    m_adapter.ShowToast(m_polygon->WaitingForSupport() ? "Test polygon ON (waiting for collision tile)" : "Test polygon ON");
 }
 
 void ModApp::StartMission(const std::string &id) {

@@ -32,6 +32,7 @@ bool TestPolygon::Enable(const Vec2d &playerGlobal, const Vec2d &origin) {
     m_roadModel = road ? road->id : -1;
     m_tileLength = m_config.tileLength;
     m_tileHeading = 0.0f;
+    m_tileHalfWidth = 0.0f;
     m_tileOffset = {};
     if (road) {
         // Use the longest collision axis along travel. Align the top of the
@@ -39,6 +40,7 @@ bool TestPolygon::Enable(const Vec2d &playerGlobal, const Vec2d &origin) {
         const bool rotate = road->colHalfExtents.x > road->colHalfExtents.y;
         m_tileHeading = rotate ? 1.57079632679f : 0.0f;
         m_tileLength = 1.98 * (rotate ? road->colHalfExtents.x : road->colHalfExtents.y);
+        m_tileHalfWidth = rotate ? road->colHalfExtents.y : road->colHalfExtents.x;
         m_tileOffset = rotate ? Vec3f{-road->colOffset.y, road->colOffset.x, road->colOffset.z} : road->colOffset;
         m_tileOffset.z += road->colHalfExtents.z;
     }
@@ -63,6 +65,7 @@ void TestPolygon::Clear() {
     for (auto &kv : m_tiles)
         m_bridge.DestroyObject(kv.second.handle);
     m_tiles.clear();
+    m_holdAt.reset();
     for (auto &kv : m_markers)
         m_bridge.RemoveMarker(kv.second);
     m_markers.clear();
@@ -83,7 +86,8 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
         return;
 
     // --- endless slab strip along +Y ---------------------------------------
-    const int64_t centre = TileIndexAt(playerGlobal.y);
+    const Vec2d target = m_holdAt.value_or(playerGlobal);
+    const int64_t centre = TileIndexAt(target.y);
     const int64_t first = centre - m_config.behindTiles;
     const int64_t last = centre + m_config.aheadTiles;
 
@@ -112,6 +116,7 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
             params.dynamic = false;
             params.interior = false;
             params.collision = true;
+            params.roadSlab = true;
             params.ownerTag = Mix64(static_cast<uint64_t>(i) ^ 0x9E3779B9ULL);
             PolygonTile tile;
             tile.index = i;
@@ -128,7 +133,7 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
     }
 
     // --- yellow markers every 200 m, snapped to the GLOBAL grid -------------
-    const int64_t markerIndex = static_cast<int64_t>(std::floor(playerGlobal.y / m_config.markerSpacing));
+    const int64_t markerIndex = static_cast<int64_t>(std::floor(target.y / m_config.markerSpacing));
     for (auto it = m_markers.begin(); it != m_markers.end();) {
         if (std::llabs(it->first - markerIndex) > m_config.markerAhead) {
             m_bridge.RemoveMarker(it->second);
@@ -148,13 +153,51 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
         m_markers.emplace(k, id);
     }
 
+    // A tile elsewhere in the strip cannot catch the player. Keep the
+    // waiting anchor in global coordinates so it survives an origin shift.
+    const auto supportingTile = m_tiles.find(centre);
+    const bool collisionReady = supportingTile != m_tiles.end() &&
+                                m_bridge.IsObjectCollisionReady(supportingTile->second.handle);
+    if (!collisionReady && supportingTile != m_tiles.end()) {
+        m_bridge.DestroyObject(supportingTile->second.handle);
+        m_tiles.erase(supportingTile);
+    }
+    const bool supportReady = collisionReady && std::abs(target.x - m_roadX) <= m_tileHalfWidth &&
+                              m_bridge.HasRoadSupportAt(supportingTile->second.handle,
+                                  {static_cast<float>(target.x - origin.x), static_cast<float>(target.y - origin.y),
+                                   m_config.generationZ});
+    if (!supportReady) {
+        if (!m_holdAt) {
+            // On an actual collision miss (e.g. terrain with holes), retry from
+            // the known tile centre instead of pinning outside the strip forever.
+            m_holdAt = collisionReady || std::abs(target.x - m_roadX) > m_tileHalfWidth
+                           ? Vec2d{m_roadX, m_startY + (static_cast<double>(centre) + 0.5) * m_tileLength}
+                           : target;
+            USA_LOG_I("TestPolygon: holding player until collision tile %lld is ready", static_cast<long long>(centre));
+        }
+        HoldPlayer(origin);
+        return;
+    }
+    if (m_holdAt) {
+        HoldPlayer(origin);
+        m_holdAt.reset();
+        USA_LOG_I("TestPolygon: supporting tile %lld ready; releasing hold", static_cast<long long>(centre));
+        return;
+    }
     Vec3f player;
     if (m_bridge.GetPlayerPosition(player) && player.z < m_config.generationZ - 5.0f)
         RestorePlayerHeight(origin, true);
 }
 
+void TestPolygon::HoldPlayer(const Vec2d &origin) {
+    m_bridge.HoldPlayerPosition({static_cast<float>(m_holdAt->x - origin.x),
+                                 static_cast<float>(m_holdAt->y - origin.y), m_config.generationZ + 1.5f});
+}
+
 void TestPolygon::OnOriginShift(const Vec2d &origin) {
-    if (m_active)
+    if (m_holdAt)
+        HoldPlayer(origin);
+    else if (m_active)
         RestorePlayerHeight(origin, false);
 }
 
