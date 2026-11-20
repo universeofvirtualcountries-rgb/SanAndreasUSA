@@ -128,20 +128,31 @@ While open it routes ordinary raw touches to a render-thread queue, applies
   The adapter re-reads the GOT indirection (which FLA may relocate) rather than
   keeping catalogue-time model pointers. Chunks retry asynchronously.
 * For each polygon candidate, `RequestModel(id, 2)` is followed by one
-  `LoadAllRequestedModels(false)`. When the native COL slot is identifiable,
+  `LoadAllRequestedModels(false)`; construction starts on a later tick. When the native COL slot is identifiable,
   the adapter also references it so ordinary collision streaming can load and
   retain it outside the slab's original city sector. There is no blocking
   retry per tile. The previous candidate and its COL reference are released
   before advancing to the next one.
-* Call `_ZN7CObject6CreateEib` as `CObject *(*)(int, bool)` with `true` for a
-  validated, prepared road slab and `false` for other objects. If the factory
-  leaves no RW instance, create it explicitly via `CEntity::CreateRwObject`.
-  Synchronize a road slab's RW transform after setting its final pose.
-* Before `CWorld::Add`, check both live model resources again and check the
-  `CObject` instance's own `m_pRwObject`. A rejected allocation is destroyed in
-  the pool without `CWorld::Remove` because it was never inserted. `Teleport`
-  on world objects is guarded too: it can internally remove and re-add them.
-  Look for `skipping unready modelId=...` in the log (rate limited per model).
+* The typed `_ZN7CObject6CreateEib(int, bool)` call is gated by
+  `IsModelLoaded`, with `true` for road slabs and `false` for other props. A
+  road returned without its own mapped RW instance is rejected, not repaired.
+  The manual `CreateRwObject` fallback is only for ordinary `Create(false)` props.
+* Immediately before `CWorld::Add` the adapter rechecks load status, the live
+  model RW/COL, at least 16 bytes of instance RW, its frame, the entity's
+  effective `GetColModel()` and finite bounds. The preflight also checks physical
+  type, repeat-sector storage and capacity in both link pools. Rejected
+  allocations are destroyed without `CWorld::Remove`; a structurally rejected
+  slab advances to the next candidate without trying it on other tiles.
+  Object `Teleport` checks effective COL/RW too, as it can re-add an object.
+* `Road Add begin` / `Road Add returned` distinguish a crash inside the native
+  insertion from one on a later game tick. These checks do not establish which
+  pointer was null in a prior crash. Telemetry reports `Catalog: N | RoadID: X |
+  Loaded: yes/no | Spawned: Z | Err: …`.
+* **Spawn Car** (Polygon or Teleports) queues one Sultan (560) on the game tick.
+  It waits for nearby solid ground and a loaded vehicle model, uses native
+  vehicle allocation and the automobile constructor, then runs the same
+  preflight. A missing export, incompatible model or timed-out request is shown
+  in StatusFeed; the streaming request is released on completion or failure.
 * Despawn: `CWorld::Remove(obj)` → native destructor via the plugin-sdk shim →
   `CPools::ms_pObjectPool->Delete(obj)`. The request owner releases the model
   through `CStreaming::SetModelIsDeletable(id)` when it unloads.
@@ -181,7 +192,7 @@ exception. If the primary road fails, try only the live-validated stock slab
 candidates `3095`, `8558`, `6959`, `18450` in that order. All candidates exclude
 `dyn_` and `object.dat` entries and require flat collision above 25 m²; normal
 catalogue entries additionally need a road name hint or native road flag.
-Barrels and crates are not road candidates. `Catalog: … | RoadID: … | Spawned: … |
+Barrels and crates are not road candidates. `Catalog: … | RoadID: … | Loaded: … | Spawned: … |
 Err: …` shows the selection, instance count and failing stage.
 
 The polygon uses a flat `content.generation_z`; chunk props and markers use

@@ -58,8 +58,10 @@ Grant storage permission to the game, otherwise the mod cannot write
    You start 2 m above a ready road; if the tile underneath is missing, the
    mod pins you at `generation_z + 1.5` until its collision is ready. Drive
    it and watch `Origin shifts` in Telemetry. The banner and Telemetry show
-   `Catalog: … | RoadID: … | Spawned: … | Err: …`.
-5. `Teleports` tab → jump to New York / Washington / Las Vegas / Los Angeles.
+   `Catalog: … | RoadID: … | Loaded: … | Spawned: … | Err: …`.
+5. Use **Spawn Car** in `Polygon` or `Teleports` to spawn a Sultan on nearby
+   solid ground. On the polygon, the request waits for the road to be ready.
+   `Teleports` can also jump to New York / Washington / Las Vegas / Los Angeles.
 6. `Missions` tab → start a JSON mission. The state is saved in `world_delta.json`.
 7. Short status messages ("Entering shop...", "Mission complete", "+$2500")
    appear as a centred banner for 3 seconds and in the telemetry tab - they are
@@ -113,8 +115,9 @@ full mission re-sync.
   If those sizes differ from Android's touch coordinates, set **both** axes
   in `config.json` (e.g. add `"screen_width": 2400, "screen_height": 1080`
   to the `"ui"` object) and restart the game.
-* **Nothing spawns** — first note the `Catalog: … | RoadID: … | Spawned: … | Err: …`
-  banner. In the log, look for `Adapter: catalogue=…`, then the rejection counts
+* **Nothing spawns** — first note the `Catalog: … | RoadID: … | Loaded: … | Spawned: … | Err: …`
+  banner. For a native crash, capture `Road Add begin` and the matching
+  `Road Add returned` (if present). In the log, look for `Adapter: catalogue=…`, then the rejection counts
   and the first eight `ms_modelInfoPtrs` slots if the catalogue is empty. Compare
   `requested`, `loaded`, and `failed` in the `ChunkStreamer` and `TestPolygon` logs.
   Keep `content.model_id_limit` at the actual table size (stock default 20000,
