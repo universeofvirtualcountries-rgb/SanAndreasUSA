@@ -25,6 +25,7 @@ struct CEntity;
 struct CVector;
 struct CColPoint;
 struct CStoredCollPoly;
+struct ColDef;
 
 namespace usa1to1 {
 namespace adapter {
@@ -93,8 +94,12 @@ class GTASAAdapter final : public core::IEngineBridge {
     int ShiftWorldVehicles(const core::Vec3f &delta) override;
 
     bool RequestModel(int modelId, bool dynamic) override;
+    bool RequestRoadModel(int modelId) override;
+    bool IsRoadModelLoaded(int modelId) override;
+    const char *RoadSpawnError() const override { return m_roadSpawnError; }
     bool IsModelLoaded(int modelId) override;
     void ReleaseModel(int modelId) override;
+    void ReleaseRoadModel(int modelId) override;
     void FlushModelStreaming() override;
 
     core::ObjectHandle CreateObject(const core::SpawnParams &params) override;
@@ -185,6 +190,12 @@ class GTASAAdapter final : public core::IEngineBridge {
     int m_modelIdLimit = 20000;
     CObject *(*m_createObject)(int, bool) = nullptr;
     void (*m_createRwObject)(CEntity *) = nullptr;
+    void (*m_updateRwMatrix)(CEntity *) = nullptr;
+    void (*m_addColRef)(int) = nullptr;
+    void (*m_removeColRef)(int) = nullptr;
+    int m_requiredRoadModel = -1;
+    int m_roadColSlot = -1;
+    const ColDef *m_roadColDef = nullptr;
     bool (*m_processVerticalLine)(const CVector &, float, CColPoint &, CEntity *&,
                                   bool, bool, bool, bool, bool, bool, CStoredCollPoly *) = nullptr;
     void *m_modelByName = nullptr;
@@ -195,6 +206,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     uint64_t m_nextMarkerEngineId = 0x55000000ULL;
 
     core::StatusFeed m_status;
+    const char *m_roadSpawnError = nullptr; // game/render lane, static messages
     std::unordered_map<uintptr_t, OwnedObject> m_owned;
     std::unordered_map<uint64_t, MarkerInfo> m_markers;
 

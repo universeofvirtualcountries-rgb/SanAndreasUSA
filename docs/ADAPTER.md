@@ -100,7 +100,10 @@ Our own JNI use (CloudSync) is different: it attaches the worker thread with
 
 Hooks are installed with `aml->Hook(target, replacement, &original)`. The
 adapter is this mod's only touch hook; it forwards unclaimed events to the game.
-While the menu is open it routes raw pixels to a render-thread queue, applies
+Three quick taps (600 ms) or a two-finger vertical swipe (60 raw px in
+both directions) toggle the menu independently of ImGui. When closed, the hook
+also owns the top-centre 25–75% × 0–12% hitbox and the top-left shortcut.
+While open it routes ordinary raw touches to a render-thread queue, applies
 `ScreenToRender` and reports `Tap raw=(x,y) -> imgui=(ix,iy) hovered=...`.
 
 ## 3. Player, vehicle, camera
@@ -123,11 +126,17 @@ While the menu is open it routes raw pixels to a render-thread queue, applies
 * `CStreaming::RequestModel(id, 0)` queues the model. A spawn requires streaming
   status `1` **and** mapped `m_pRwObject` / `m_pColModel` in the live model slot.
   The adapter re-reads the GOT indirection (which FLA may relocate) rather than
-  keeping catalogue-time model pointers. Chunks retry asynchronously; polygon
-  enable and interior entry each flush at most once, then also retry on ticks.
-* Call `_ZN7CObject6CreateEib` as `CObject *(*)(int, bool)` with `false` for the
-  second parameter. If that leaves no RW instance, create it explicitly via
-  `CEntity::CreateRwObject` before inserting the object.
+  keeping catalogue-time model pointers. Chunks retry asynchronously.
+* For each polygon candidate, `RequestModel(id, 2)` is followed by one
+  `LoadAllRequestedModels(false)`. When the native COL slot is identifiable,
+  the adapter also references it so ordinary collision streaming can load and
+  retain it outside the slab's original city sector. There is no blocking
+  retry per tile. The previous candidate and its COL reference are released
+  before advancing to the next one.
+* Call `_ZN7CObject6CreateEib` as `CObject *(*)(int, bool)` with `true` for a
+  validated, prepared road slab and `false` for other objects. If the factory
+  leaves no RW instance, create it explicitly via `CEntity::CreateRwObject`.
+  Synchronize a road slab's RW transform after setting its final pose.
 * Before `CWorld::Add`, check both live model resources again and check the
   `CObject` instance's own `m_pRwObject`. A rejected allocation is destroyed in
   the pool without `CWorld::Remove` because it was never inserted. `Teleport`
@@ -167,9 +176,13 @@ configured table limit. Both paths require a matching static-model type, a
 bounded model name, a valid draw distance and a collision box. The road is
 selected from the native road-flagged table entries, then the whitelist, the
 `RoadFlat` bucket, and finally the largest suitable flat collision footprint.
-All tiers restrict road IDs to **3000–18000**, exclude `dyn_` and `object.dat`
-props and require a road/terrain name hint or native road flag plus a flat
-collision footprint strictly above 25 m².
+The default range is **3000–18000**, with **18450** as a single explicit
+exception. If the primary road fails, try only the live-validated stock slab
+candidates `3095`, `8558`, `6959`, `18450` in that order. All candidates exclude
+`dyn_` and `object.dat` entries and require flat collision above 25 m²; normal
+catalogue entries additionally need a road name hint or native road flag.
+Barrels and crates are not road candidates. `Catalog: … | RoadID: … | Spawned: … |
+Err: …` shows the selection, instance count and failing stage.
 
 The polygon uses a flat `content.generation_z`; chunk props and markers use
 that base plus deterministic terrain relief. The polygon moves the player to

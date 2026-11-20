@@ -6,6 +6,7 @@
 #include <mod/thirdparty/imgui/imgui.h>
 #include <plugin-sdk/renderware/imgui/imgui_impl_renderware.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -68,8 +69,14 @@ void ImGuiOverlay::SetMissions(const core::MissionManager *missions, const core:
 }
 
 void ImGuiOverlay::SetVisible(bool visible) {
-    m_visible.store(visible);
+    if (m_visible.exchange(visible) != visible)
+        CancelPointer();
     ImGui_ImplRenderWare_SetDirectTouchCapture(visible);
+}
+
+core::PixelSize ImGuiOverlay::TouchScreenSize() const {
+    const uint32_t packed = m_touchScreen.load();
+    return {static_cast<int>(packed >> 16), static_cast<int>(packed & 0xFFFF)};
 }
 
 bool ImGuiOverlay::HandleTouch(int action, int track, int x, int y) {
@@ -83,6 +90,8 @@ bool ImGuiOverlay::HandleTouch(int action, int track, int x, int y) {
 void ImGuiOverlay::InputCallback(int screenW, int screenH, int renderW, int renderH) {
     if (!g_overlay)
         return;
+    if (screenW > 0 && screenH > 0 && screenW <= 65535 && screenH <= 65535)
+        g_overlay->m_touchScreen.store((uint32_t(screenW) << 16) | uint32_t(screenH));
     // Process DOWN and UP in separate frames, even for a tap between renders.
     // This is the modern ImGui equivalent of setting io.MouseDown[0].
     const auto event = g_overlay->m_touches.Pop();
@@ -112,8 +121,8 @@ void ImGuiOverlay::DrawTapStatus() {
     if (m_tapStatus.Fresh(line, now)) {
         const float x = (ImGui::GetIO().DisplaySize.x - ImGui::CalcTextSize(line.c_str()).x) * 0.5f;
         auto *draw = ImGui::GetForegroundDrawList();
-        draw->AddText(ImVec2(x + 1.0f, 75.0f), IM_COL32(0, 0, 0, 220), line.c_str());
-        draw->AddText(ImVec2(x, 74.0f), IM_COL32(255, 236, 160, 255), line.c_str());
+        draw->AddText(ImVec2(x + 1.0f, 103.0f), IM_COL32(0, 0, 0, 220), line.c_str());
+        draw->AddText(ImVec2(x, 102.0f), IM_COL32(255, 236, 160, 255), line.c_str());
     }
 }
 
@@ -126,24 +135,24 @@ void ImGuiOverlay::RenderCallback() {
 
 // Small, always visible pill at the top center of the render surface.
 void ImGuiOverlay::DrawCornerButton() {
-    const ImVec4 bg(0.05f, 0.05f, 0.08f, 0.42f);
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f - 59.0f, 12.0f), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(118.0f, 36.0f), ImGuiCond_Always);
+    const ImVec4 bg(0.03f, 0.04f, 0.07f, 1.0f);
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x * 0.5f - 80.0f, 16.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(160.0f, 48.0f), ImGuiCond_Always);
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                                   ImGuiWindowFlags_NoCollapse;
+                                   ImGuiWindowFlags_NoCollapse | (Visible() ? 0 : ImGuiWindowFlags_NoInputs);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, bg);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.10f, 0.14f, 0.30f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.20f, 0.28f, 0.55f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.30f, 0.40f, 0.65f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.28f, 0.48f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.12f, 0.39f, 0.61f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.13f, 0.38f, 0.53f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(3.0f, 3.0f));
 
     if (ImGui::Begin("##usa1to1_corner", nullptr, flags)) {
-        if (ImGui::Button("[USA 1:1]", ImVec2(112.0f, 30.0f)))
+        if (ImGui::Button("[USA 1:1]", ImVec2(154.0f, 42.0f)))
             Toggle();
     }
     ImGui::End();
@@ -155,6 +164,17 @@ void ImGuiOverlay::DrawCornerButton() {
 void ImGuiOverlay::Draw() {
     // Drawn before the visibility check: the corner button is the way *in*.
     DrawCornerButton();
+    if (m_model.polygonActive && !m_model.roadStatus.empty()) {
+        const char *text = m_model.roadStatus.c_str();
+        const float width = ImGui::GetIO().DisplaySize.x;
+        const float wrap = std::max(1.0f, width - 20.0f);
+        const ImVec2 size = ImGui::CalcTextSize(text, nullptr, false, wrap);
+        const float x = (width - size.x) * 0.5f;
+        auto *draw = ImGui::GetForegroundDrawList();
+        draw->AddRectFilled(ImVec2(x - 5.0f, 66.0f), ImVec2(x + size.x + 5.0f, 70.0f + size.y),
+                            IM_COL32(8, 12, 18, 225), 4.0f);
+        draw->AddText(nullptr, 0.0f, ImVec2(x, 68.0f), IM_COL32(255, 245, 196, 255), text, nullptr, wrap);
+    }
 
     // Status line from ShowToast() (no AML toasts - they abort on ART): a short
     // centred banner that does not depend on the menu being open.
@@ -164,9 +184,9 @@ void ImGuiOverlay::Draw() {
         const char *text = m_model.statusLine.c_str();
         const float textWidth = ImGui::CalcTextSize(text).x;
         const float alpha = m_model.statusAgeSec > 2.0 ? static_cast<float>(3.0 - m_model.statusAgeSec) : 1.0f;
-        ImGui::GetForegroundDrawList()->AddText(ImVec2((w - textWidth) * 0.5f, 56.0f),
+        ImGui::GetForegroundDrawList()->AddText(ImVec2((w - textWidth) * 0.5f, 92.0f),
                                                 IM_COL32(0, 0, 0, static_cast<int>(160 * alpha)), text);
-        ImGui::GetForegroundDrawList()->AddText(ImVec2((w - textWidth) * 0.5f - 1.0f, 55.0f),
+        ImGui::GetForegroundDrawList()->AddText(ImVec2((w - textWidth) * 0.5f - 1.0f, 91.0f),
                                                 IM_COL32(255, 236, 160, static_cast<int>(230 * alpha)), text);
     }
 
@@ -214,6 +234,8 @@ void ImGuiOverlay::Draw() {
                 ImGui::TextWrapped("Active: %s", m_model.missionLabel.c_str());
             if (!m_model.saveLabel.empty())
                 TextDim("%s", m_model.saveLabel.c_str());
+            if (!m_model.roadStatus.empty())
+                ImGui::TextWrapped("%s", m_model.roadStatus.c_str());
             if (!m_model.statusLine.empty())
                 TextDim("status: %s", m_model.statusLine.c_str());
             ImGui::EndTabItem();

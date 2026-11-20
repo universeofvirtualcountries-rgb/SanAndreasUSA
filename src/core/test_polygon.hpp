@@ -53,10 +53,13 @@ class TestPolygon {
     bool WaitingForSupport() const { return m_holdAt.has_value(); }
     bool HasVisuals() const { return !m_tiles.empty(); }
     int RoadModel() const { return m_roadModel; }
+    std::string StatusLine() const;
     int64_t TileIndexAt(double globalY) const;
 
   private:
     void Clear();
+    void ClearRoad();
+    void SelectRoad(const Vec2d &anchor);
     void HoldPlayer(const Vec2d &origin);
     void RestorePlayerHeight(const Vec2d &origin, bool recenter);
 
@@ -65,6 +68,10 @@ class TestPolygon {
     Config m_config;
     bool m_active = false;
     int m_roadModel = -1;
+    std::vector<int> m_candidates;
+    size_t m_candidate = 0;
+    double m_fallbackAt = 0.0;
+    std::string m_roadError;
     bool m_requested = false;
     float m_tileHeading = 0.0f;
     double m_tileLength = 20.0;

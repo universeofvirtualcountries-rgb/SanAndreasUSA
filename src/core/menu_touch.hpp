@@ -64,6 +64,13 @@ class MenuTouchQueue {
         return event;
     }
 
+    void CancelPointer() {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        m_pending.clear();
+        m_pending.push_back({TouchAction::Cancel, 0, 0});
+        m_primary = -1; // retain capture of already-down fingers through their UP
+    }
+
     void Reset() {
         const std::lock_guard<std::mutex> lock(m_mutex);
         m_captured.fill(false);
