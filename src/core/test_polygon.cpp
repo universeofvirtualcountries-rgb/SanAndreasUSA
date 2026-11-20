@@ -41,13 +41,13 @@ bool TestPolygon::Enable(const Vec2d &playerGlobal, const Vec2d &origin) {
     m_nextRecoveryLog = m_bridge.NowSeconds();
     SelectRoad(playerGlobal);
     RestorePlayerHeight(origin, false);
-    Update(playerGlobal, origin);
+    UpdateTiles(playerGlobal, origin, false); // pin now; first Create is on a later tick
     return true;
 }
 
 std::string TestPolygon::StatusLine() const {
-    return "Catalog: " + std::to_string(m_catalog.Size()) + " models | RoadID: " + std::to_string(m_roadModel) +
-           " | Spawned: " + std::to_string(m_tiles.size()) + " | Err: " +
+    return "Catalog: " + std::to_string(m_catalog.Size()) + " | RoadID: " + std::to_string(m_roadModel) +
+           " | Loaded: " + (m_modelLoaded ? "yes" : "no") + " | Spawned: " + std::to_string(m_tiles.size()) + " | Err: " +
            (!m_active ? "polygon off" : m_roadError.empty() ? "none" : m_roadError);
 }
 
@@ -69,6 +69,8 @@ void TestPolygon::SelectRoad(const Vec2d &anchor) {
         m_tileOffset.z += road->colHalfExtents.z;
     }
     m_startY = anchor.y - m_tileLength * 0.5;
+    m_modelLoaded = false;
+    m_rejected = false;
     m_requested = road && m_bridge.RequestRoadModel(m_roadModel);
     if (m_requested) {
         m_bridge.FlushModelStreaming(); // once per candidate, outside the tile loop
@@ -91,6 +93,7 @@ void TestPolygon::ClearRoad() {
     if (m_requested)
         m_bridge.ReleaseRoadModel(m_roadModel);
     m_requested = false;
+    m_modelLoaded = false;
 }
 
 void TestPolygon::Clear() {
@@ -109,6 +112,10 @@ void TestPolygon::Disable() {
 }
 
 void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
+    UpdateTiles(playerGlobal, origin, true);
+}
+
+void TestPolygon::UpdateTiles(const Vec2d &playerGlobal, const Vec2d &origin, bool allowSpawn) {
     if (!m_active)
         return;
 
@@ -127,12 +134,18 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
         }
     }
 
-    const bool modelReady = m_requested && m_bridge.IsRoadModelLoaded(m_roadModel);
-    if (m_requested && !modelReady) {
+    const bool wasLoaded = m_modelLoaded;
+    m_modelLoaded = m_requested && m_bridge.IsRoadModelLoaded(m_roadModel);
+    if (m_requested && !m_modelLoaded && !m_rejected) {
         const char *reason = m_bridge.RoadSpawnError();
         m_roadError = reason ? reason : "model not loaded; Add not called";
+        if (wasLoaded && m_bridge.RequestRoadModel(m_roadModel)) {
+            // One re-request on a loaded -> unloaded edge; no per-tile flush.
+            m_bridge.FlushModelStreaming();
+            m_fallbackAt = m_bridge.NowSeconds() + 4.0;
+        }
     }
-    if (modelReady && m_bridge.NowSeconds() >= m_nextSpawnAttempt) {
+    if (allowSpawn && m_modelLoaded && !m_rejected && m_bridge.NowSeconds() >= m_nextSpawnAttempt) {
         int failed = 0;
         // Prioritise the only slab that can release the hold.
         for (int64_t slot = first - 1; slot <= last; ++slot) {
@@ -159,10 +172,13 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
                 m_tiles.emplace(i, tile);
             else {
                 ++failed;
-                if (i == centre) {
+                m_rejected = m_bridge.RoadCandidateRejected();
+                if (i == centre || m_rejected) {
                     const char *reason = m_bridge.RoadSpawnError();
                     m_roadError = reason ? reason : "CreateObject failed; Add not confirmed";
                 }
+                if (m_rejected)
+                    break;
             }
         }
         if (failed) {
@@ -206,8 +222,8 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
                               m_bridge.HasRoadSupportAt(supportingTile->second.handle,
                                   {static_cast<float>(target.x - origin.x), static_cast<float>(target.y - origin.y),
                                    m_config.generationZ});
-    if (!supportReady) {
-        if (collisionReady) {
+    if (!supportReady || (m_rejected && m_candidate + 1 < m_candidates.size())) {
+        if (!m_rejected && collisionReady) {
             if (std::abs(target.x - m_roadX) > m_tileHalfWidth)
                 m_roadError = "player outside slab bounds";
             else {
@@ -224,7 +240,7 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
             USA_LOG_I("TestPolygon: holding player until collision tile %lld is ready", static_cast<long long>(centre));
         }
         HoldPlayer(origin);
-        if (m_candidate + 1 < m_candidates.size() && m_bridge.NowSeconds() >= m_fallbackAt) {
+        if (allowSpawn && m_candidate + 1 < m_candidates.size() && (m_rejected || m_bridge.NowSeconds() >= m_fallbackAt)) {
             const std::string previous = m_roadError;
             USA_LOG_W("TestPolygon: retry with fallback after %s", StatusLine().c_str());
             ClearRoad();
@@ -235,7 +251,8 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
         }
         return;
     }
-    m_roadError.clear();
+    if (!m_rejected)
+        m_roadError.clear();
     m_fallbackAt = m_bridge.NowSeconds() + 4.0;
     if (m_holdAt) {
         HoldPlayer(origin);
@@ -246,6 +263,24 @@ void TestPolygon::Update(const Vec2d &playerGlobal, const Vec2d &origin) {
     Vec3f player;
     if (m_bridge.GetPlayerPosition(player) && player.z < m_config.generationZ - 5.0f)
         RestorePlayerHeight(origin, true);
+}
+
+std::optional<Vec3f> TestPolygon::TestCarPosition(const Vec2d &playerGlobal, const Vec2d &origin) {
+    if (!m_active || m_holdAt)
+        return std::nullopt;
+    for (const double ahead : {7.0, -7.0}) {
+        const double y = playerGlobal.y + ahead;
+        const double dx = m_roadX - playerGlobal.x;
+        if (std::abs(dx) > 10.0)
+            return std::nullopt;
+        const auto tile = m_tiles.find(TileIndexAt(y));
+        if (tile == m_tiles.end() || !m_bridge.IsObjectCollisionReady(tile->second.handle))
+            continue;
+        const Vec3f surface{static_cast<float>(m_roadX - origin.x), static_cast<float>(y - origin.y), m_config.generationZ};
+        if (m_bridge.HasRoadSupportAt(tile->second.handle, surface))
+            return Vec3f{surface.x, surface.y, surface.z + 1.0f};
+    }
+    return std::nullopt;
 }
 
 void TestPolygon::HoldPlayer(const Vec2d &origin) {

@@ -3,6 +3,7 @@
 #include "core/log.hpp"
 #include "core/safe.hpp"
 #include "core/spawn_validation.hpp"
+#include "core/test_car.hpp"
 
 #include <cfloat> // FLT_EPSILON, used by plugin-sdk/gta_base/Vector.h
 
@@ -17,6 +18,8 @@
 #include <plugin-sdk/game_sa/engine/ModelInfo.h>
 #include <plugin-sdk/game_sa/engine/Streaming.h>
 #include <plugin-sdk/game_sa/engine/World.h>
+#include <plugin-sdk/game_sa/engine/VehicleModelInfo.h>
+#include <plugin-sdk/game_sa/entity/Automobile.h>
 #include <plugin-sdk/game_sa/entity/Camera.h>
 #include <plugin-sdk/game_sa/entity/Object.h>
 #include <plugin-sdk/game_sa/entity/PlayerPed.h>
@@ -175,10 +178,23 @@ bool GTASAAdapter::VerifyEngineSymbols() {
     m_createObject = reinterpret_cast<decltype(m_createObject)>(Symbol("_ZN7CObject6CreateEib"));
     m_createRwObject = reinterpret_cast<decltype(m_createRwObject)>(Symbol("_ZN7CEntity14CreateRwObjectEv"));
     m_updateRwMatrix = reinterpret_cast<decltype(m_updateRwMatrix)>(Symbol("_ZN7CEntity14UpdateRwMatrixEv"));
+    // Native reference return is a pointer at the ABI boundary. Validate it
+    // before dereferencing; vehicles can use a special COL instead of model COL.
+    m_getEntityCollision = reinterpret_cast<decltype(m_getEntityCollision)>(Symbol("_ZN7CEntity11GetColModelEv"));
+    m_vehicleAlloc = reinterpret_cast<decltype(m_vehicleAlloc)>(Symbol(BYBIT("_ZN8CVehiclenwEj", "_ZN8CVehiclenwEm")));
+    if (!m_vehicleAlloc)
+        m_vehicleAlloc = reinterpret_cast<decltype(m_vehicleAlloc)>(Symbol("_ZN8CVehiclenwEj"));
+    m_vehicleFree = reinterpret_cast<decltype(m_vehicleFree)>(Symbol("_ZN8CVehicledlEPv"));
+    m_automobileCtor = reinterpret_cast<decltype(m_automobileCtor)>(Symbol("_ZN11CAutomobileC2Eihh"));
+    m_automobileDtor = reinterpret_cast<decltype(m_automobileDtor)>(Symbol("_ZN11CAutomobileD2Ev"));
+    if (const auto *vtable = static_cast<const uintptr_t *>(Symbol("_ZTV17CVehicleModelInfo")))
+        m_vehicleModelVtable = vtable + 2;
     m_addColRef = reinterpret_cast<decltype(m_addColRef)>(Symbol("_ZN9CColStore6AddRefEi"));
     m_removeColRef = reinterpret_cast<decltype(m_removeColRef)>(Symbol("_ZN9CColStore9RemoveRefEi"));
     m_processVerticalLine = reinterpret_cast<decltype(m_processVerticalLine)>(
         Symbol("_ZN6CWorld19ProcessVerticalLineERK7CVectorfR9CColPointRP7CEntitybbbbbbP15CStoredCollPoly"));
+    m_testWorldSphere = reinterpret_cast<decltype(m_testWorldSphere)>(
+        Symbol("_ZN6CWorld22TestSphereAgainstWorldE7CVectorfP7CEntitybbbbbb"));
     if (!m_processVerticalLine)
         USA_LOG_W("Adapter: no CWorld::ProcessVerticalLine; the polygon cannot confirm road support");
     m_syms.objectCreate = m_createObject && Symbol("_ZN7CObjectD2Ev");
@@ -724,18 +740,20 @@ void GTASAAdapter::LogUnreadyModel(int modelId, const char *reason) {
     }
 }
 
-static bool HasRoadSurface(const CBaseModelInfo *info) {
+static bool HasCollisionPrimitives(const CBaseModelInfo *info, bool allowSphereOnly = false) {
     if (!HasMappedModelResources(info))
         return false;
     const auto *data = info->m_pColModel->m_pColData;
     if (!IsMappedRange(data, sizeof(*data)))
+        return false;
+    if (data->m_nNumSpheres > 0 && !IsMappedRange(data->m_pSpheres, sizeof(*data->m_pSpheres) * data->m_nNumSpheres))
         return false;
     if (data->m_nNumBoxes > 0 && !IsMappedRange(data->m_pBoxes, sizeof(*data->m_pBoxes) * data->m_nNumBoxes))
         return false;
     if (data->m_nNumTriangles > 0 && (!IsMappedRange(data->m_pVertices, sizeof(*data->m_pVertices)) ||
                                     !IsMappedRange(data->m_pTriangles, sizeof(*data->m_pTriangles) * data->m_nNumTriangles)))
         return false;
-    return data->m_nNumBoxes > 0 || data->m_nNumTriangles > 0;
+    return data->m_nNumBoxes > 0 || data->m_nNumTriangles > 0 || (allowSphereOnly && data->m_nNumSpheres > 0);
 }
 
 static const ColDef *LiveCollisionSlot(uintptr_t gameBase, int slot, int modelId) {
@@ -769,6 +787,7 @@ void GTASAAdapter::ReleaseRoadModel(int id) {
 }
 
 bool GTASAAdapter::RequestRoadModel(int id) {
+    m_roadCandidateRejected = false;
     if (!IsRoadSlabId(id) || id >= ModelScanLimit() || !LiveModelInfo(id) || !LiveStreamingInfo(m_gameBase, id)) {
         m_roadSpawnError = "invalid live road model/streaming slot";
         return false;
@@ -786,7 +805,7 @@ bool GTASAAdapter::RequestRoadModel(int id) {
     // DFF loading alone doesn't keep the geographically streamed COL loaded at
     // the polygon's new coordinates. Pin the matching native COL slot when it
     // can be verified; the game's collision streaming will load/retain it.
-    if (m_addColRef && m_removeColRef && IsMappedRange(col, sizeof(*col))) {
+    if (!m_roadColDef && m_addColRef && m_removeColRef && IsMappedRange(col, sizeof(*col))) {
         const int slot = col->m_nColSlot;
         const auto *def = LiveCollisionSlot(m_gameBase, slot, id);
         if (def && def->m_nRefCount >= 0 && def->m_nRefCount < std::numeric_limits<int16_t>::max()) {
@@ -806,9 +825,9 @@ bool GTASAAdapter::IsRoadModelLoaded(int id) {
                             ? LiveStreamingInfo(m_gameBase, id) : nullptr;
     if (!entry || entry->m_status != 1)
         m_roadSpawnError = "model not loaded after RequestModel/flush";
-    else if (!HasMappedModelResources(LiveModelInfo(id)))
+    else if (!IsModelLoaded(id))
         m_roadSpawnError = "loaded model missing RW or COL";
-    else if (!HasRoadSurface(LiveModelInfo(id)))
+    else if (!HasCollisionPrimitives(LiveModelInfo(id)))
         m_roadSpawnError = "loaded COL missing boxes/triangles";
     else {
         m_roadSpawnError = nullptr;
@@ -817,11 +836,180 @@ bool GTASAAdapter::IsRoadModelLoaded(int id) {
     return false;
 }
 
+namespace {
+template <class Pool> bool HasFreeNodes(uintptr_t gotAddress, unsigned needed) {
+    auto ***got = reinterpret_cast<Pool ***>(gotAddress);
+    if (!IsMappedRange(got, sizeof(*got)) || !IsMappedRange(*got, sizeof(**got)))
+        return false;
+    const auto *pool = **got;
+    if (!IsMappedRange(pool, sizeof(*pool)) || pool->m_nSize <= 0 || pool->m_nSize > (1 << 22) ||
+        !IsMappedRange(pool->m_byteMap, static_cast<size_t>(pool->m_nSize) * sizeof(*pool->m_byteMap)))
+        return false;
+    for (int i = 0; i < pool->m_nSize; ++i)
+        if (pool->m_byteMap[i].bEmpty && --needed == 0)
+            return true;
+    return false;
+}
+
+bool FinitePosition(const CVector &pos) {
+    return std::isfinite(pos.x) && std::isfinite(pos.y) && std::isfinite(pos.z);
+}
+} // namespace
+
+const char *GTASAAdapter::PhysicalAddError(CPhysical *entity, int id, unsigned type, bool fresh) {
+    if (!HasMappedObjectInstance(entity) || !IsMappedRange(entity->m_pRwObject->parent, sizeof(RwFrame)))
+        return "instance RW/frame null or unmapped; Add not called";
+    if (entity->m_nModelIndex != id || entity->m_nType != type || (fresh && entity->m_pCollisionList))
+        return "invalid physical type, model or existing sector links; Add not called";
+    if (!IsModelLoaded(id))
+        return "model lost streaming/RW/COL readiness; Add not called";
+    if (entity->m_matrix && !IsMappedRange(entity->m_matrix, sizeof(*entity->m_matrix)))
+        return "unmapped placeable matrix; Add not called";
+    if (!m_getEntityCollision)
+        return "CEntity::GetColModel unavailable; Add not called";
+    const auto *col = m_getEntityCollision(entity);
+    if (!IsMappedRange(col, sizeof(*col)))
+        return "effective entity COL null or unmapped; Add not called";
+    const auto &bounds = col->m_boundSphere;
+    const float radius = bounds.m_fRadius;
+    if (!FinitePosition(entity->GetPosition()) || !FinitePosition(bounds.m_vecCentre) ||
+        !FinitePosition(col->m_boundBox.m_vecMin) || !FinitePosition(col->m_boundBox.m_vecMax) || col->m_boundBox.IsInvalid() ||
+        !std::isfinite(radius) || radius <= 0.0f || radius > 1024.0f)
+        return "invalid transform or COL bounds; Add not called";
+    if (fresh) {
+        const auto **sectors = reinterpret_cast<const CRepeatSector **>(m_gameBase + BYBIT(0x6771E4, 0x84C400));
+        if (!IsMappedRange(sectors, sizeof(*sectors)) || !IsMappedRange(*sectors, sizeof(**sectors) * 16 * 16))
+            return "repeat sectors unavailable; Add not called";
+        // One entry-info node + one double-link per overlapping repeat-sector.
+        // Overestimate the count by a sector to cover arbitrary grid alignment.
+        const unsigned side = static_cast<unsigned>(std::ceil(2.0f * radius / 50.0f)) + 2;
+        if (!HasFreeNodes<CEntryInfoNodePool>(m_gameBase + BYBIT(0x679C1C, 0x851850), side * side) ||
+            !HasFreeNodes<CPtrNodeDoubleLinkPool>(m_gameBase + BYBIT(0x67836C, 0x84E6F0), side * side))
+            return "sector-link pools unavailable or too full; Add not called";
+    }
+    return nullptr;
+}
+
+const char *GTASAAdapter::SyncPhysicalTransform(CPhysical *entity, const Vec3f &pos, float heading) {
+    if (!HasMappedObjectInstance(entity))
+        return "instance RW null or unmapped; Add not called";
+    auto *frame = static_cast<RwFrame *>(entity->m_pRwObject->parent);
+    if (!IsMappedRange(frame, sizeof(*frame)))
+        return "instance RW frame null or unmapped; Add not called";
+    if (m_updateRwMatrix)
+        m_updateRwMatrix(entity);
+    else {
+        const float c = std::cos(heading), s = std::sin(heading);
+        auto &m = frame->modelling;
+        m.right = {c, s, 0.0f};
+        m.up = {-s, c, 0.0f};
+        m.at = {0.0f, 0.0f, 1.0f};
+        m.pos = {pos.x, pos.y, pos.z};
+        m.flags = (m.flags & ~(rwMATRIXINTERNALIDENTITY | rwMATRIXTYPEMASK)) | rwMATRIXTYPEORTHONORMAL;
+    }
+    entity->UpdateRwFrame();
+    return nullptr;
+}
+
+bool GTASAAdapter::IsTestCarModel(int id) const {
+    if (id != TestCarRequest::kModel || !m_vehicleModelVtable)
+        return false;
+    const auto *info = LiveModelInfo(id);
+    if (!IsMappedRange(info, sizeof(CVehicleModelInfo)))
+        return false;
+    const void *vtable = nullptr;
+    std::memcpy(&vtable, info, sizeof(vtable));
+    return vtable == m_vehicleModelVtable &&
+           static_cast<const CVehicleModelInfo *>(info)->m_nVehicleType == VEHICLE_AUTOMOBILE;
+}
+
+bool GTASAAdapter::RequestTestCarModel(int id) {
+    if (!m_runtimeReady || !m_syms.streaming || !m_syms.requestModel || !m_syms.flushModels ||
+        !m_syms.releaseModel || !m_syms.worldAdd || !m_vehicleAlloc || !m_vehicleFree ||
+        !m_automobileCtor || !m_automobileDtor || !m_getEntityCollision ||
+        !CStreaming::IsInitialised() || !IsTestCarModel(id) || !LiveStreamingInfo(m_gameBase, id)) {
+        ShowToast("Spawn Car unavailable: vehicle symbols or live Sultan model missing");
+        return false;
+    }
+    CStreaming::RequestModel(id, 2);
+    return true;
+}
+
+bool GTASAAdapter::FindTestCarGround(const Vec3f &player, Vec3f &position) {
+    if (!m_processVerticalLine)
+        return false;
+    for (const Vec2d &delta : {Vec2d{0, 7}, Vec2d{0, -7}, Vec2d{7, 0}, Vec2d{-7, 0}}) {
+        const CVector start(player.x + static_cast<float>(delta.x), player.y + static_cast<float>(delta.y), player.z + 2.0f);
+        CColPoint hit{};
+        CEntity *entity = nullptr;
+        if (m_processVerticalLine(start, player.z - 2.5f, hit, entity,
+                                  true, false, false, true, true, false, nullptr) && hit.GetNormal().z > 0.6f) {
+            position = {start.x, start.y, hit.GetPosition().z + 1.0f};
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GTASAAdapter::SpawnTestCar(int id, const Vec3f &pos) {
+    const auto fail = [&](const char *reason) {
+        ShowToast(std::string("Spawn Car: ") + reason);
+        return false;
+    };
+    if (!m_syms.worldAdd || !m_vehicleAlloc || !m_vehicleFree || !m_automobileCtor || !m_automobileDtor ||
+        !IsTestCarModel(id) || !IsModelLoaded(id) || !HasCollisionPrimitives(LiveModelInfo(id), true) || !FinitePosition(ToCV(pos)))
+        return fail("Sultan model or collision not ready; Add not called");
+
+    // Repeated button presses must not stack vehicles at the same point.
+    if (m_testWorldSphere && m_testWorldSphere(ToCV(pos), 2.8f, nullptr, false, true, true, false, false, false))
+        return fail("nearby vehicle or pedestrian blocks the spawn point");
+    auto *car = static_cast<CAutomobile *>(m_vehicleAlloc(sizeof(CAutomobile)));
+    if (!car)
+        return fail("vehicle pool allocation failed");
+    if (!IsMappedRange(car, sizeof(*car))) {
+        m_vehicleFree(car);
+        return fail("vehicle slot not mapped");
+    }
+    m_automobileCtor(car, id, PARKED_VEHICLE, 1);
+    const auto discard = [&] {
+        if (!HasMappedObjectInstance(car) || !IsMappedRange(car->m_pRwObject->parent, sizeof(RwFrame)))
+            car->m_pRwObject = nullptr;
+        if (car->m_matrix && !IsMappedRange(car->m_matrix, sizeof(*car->m_matrix)))
+            car->m_matrix = nullptr;
+        m_automobileDtor(car);
+        m_vehicleFree(car);
+    };
+    if (!HasMappedObjectInstance(car) || (car->m_matrix && !IsMappedRange(car->m_matrix, sizeof(*car->m_matrix)))) {
+        discard();
+        return fail("vehicle instance RW/matrix unavailable; Add not called");
+    }
+    car->m_nStatus = STATUS_ABANDONED;
+    car->bUsesCollision = true;
+    car->GetPosition() = ToCV(pos);
+    if (const char *error = SyncPhysicalTransform(car, pos, 0.0f)) {
+        discard();
+        return fail(error);
+    }
+    if (const char *error = PhysicalAddError(car, id, ENTITY_TYPE_VEHICLE, true)) {
+        discard();
+        return fail(error);
+    }
+    USA_LOG_I("Car Add begin: model=%d vehicle=%p", id, static_cast<void *>(car));
+    CWorld::Add(car);
+    USA_LOG_I("Car Add returned: model=%d vehicle=%p", id, static_cast<void *>(car));
+    ShowToast("Spawn Car: Sultan ready");
+    return true;
+}
+
 ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     const int id = params.modelId;
-    const auto fail = [&](const char *reason) -> ObjectHandle {
-        if (params.roadSlab)
+    const auto fail = [&](const char *reason, bool reject = true) -> ObjectHandle {
+        if (params.roadSlab) {
             m_roadSpawnError = reason;
+            m_roadCandidateRejected = reject;
+            if (reject)
+                ShowToast("Road " + std::to_string(id) + ": " + reason);
+        }
         LogUnreadyModel(id, reason);
         return {};
     };
@@ -829,13 +1017,14 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
         return fail("Create/Add/Remove unavailable; Add not called");
     if (id < 0 || id >= ModelScanLimit() || (params.roadSlab && !IsRoadSlabId(id)))
         return fail("invalid model ID; Add not called");
+    if (!IsModelLoaded(id))
+        return fail("model not loaded before CObject::Create; Add not called", false);
     if (params.roadSlab) {
+        m_roadCandidateRejected = false;
         if (m_requiredRoadModel != id)
             return fail("road model not requested; Add not called");
         if (!IsRoadModelLoaded(id))
             return {}; // already has a precise reason; Add not called
-    } else if (!IsModelLoaded(id)) {
-        return fail("not ready for CObject::Create");
     }
 
     CObject *obj = params.roadSlab ? m_createObject(id, true) : m_createObject(id, false);
@@ -845,6 +1034,20 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     if (!IsMappedRange(obj, sizeof(*obj)) || obj->m_nModelIndex != id) {
         DeletePoolObject(obj, false);
         return fail("invalid instance/model index after Create; Add not called");
+    }
+
+    // Reject a broken Create(true) result before touching its matrix or flags.
+    if (params.roadSlab && !HasMappedObjectInstance(obj)) {
+        DeletePoolObject(obj, false);
+        return fail("Create(true) returned null or unmapped instance RW; Add not called");
+    }
+    if (!IsModelLoaded(id)) {
+        DeletePoolObject(obj, false);
+        return fail("model lost readiness after Create; Add not called", false);
+    }
+    if (obj->m_matrix && !IsMappedRange(obj->m_matrix, sizeof(*obj->m_matrix))) {
+        DeletePoolObject(obj, false);
+        return fail("Create returned unmapped matrix; Add not called");
     }
 
     obj->bIsStatic = !params.dynamic;
@@ -859,43 +1062,28 @@ ObjectHandle GTASAAdapter::CreateObject(const SpawnParams &params) {
     obj->GetPosition() = ToCV(params.pos);
     // Some builds leave the instance RW object empty when the factory flag is
     // false. Instantiate it explicitly, never insert a collision-only shell.
-    if (!obj->m_pRwObject && m_createRwObject && HasMappedModelResources(LiveModelInfo(id)))
+    if (!params.roadSlab && !obj->m_pRwObject && m_createRwObject && IsModelLoaded(id))
         m_createRwObject(obj);
-    if (!HasMappedObjectInstance(obj)) {
+    if (const char *error = SyncPhysicalTransform(obj, params.pos, params.headingRad)) {
         DeletePoolObject(obj, false);
-        return fail("missing instance RW after Create; Add not called");
+        return fail(error);
     }
-    if (params.roadSlab) {
-        auto *frame = static_cast<RwFrame *>(obj->m_pRwObject->parent);
-        if (!IsMappedRange(frame, sizeof(*frame))) {
-            DeletePoolObject(obj, false);
-            return fail("missing RW frame; Add not called");
-        }
-        // With Create(true), RW may have been instantiated before we set the
-        // entity pose. UpdateRwFrame propagates the matrix; it doesn't copy it.
-        if (m_updateRwMatrix)
-            m_updateRwMatrix(obj);
-        else {
-            const float c = std::cos(params.headingRad), s = std::sin(params.headingRad);
-            auto &m = frame->modelling;
-            m.right = {c, s, 0.0f};
-            m.up = {-s, c, 0.0f};
-            m.at = {0.0f, 0.0f, 1.0f};
-            m.pos = {params.pos.x, params.pos.y, params.pos.z};
-            m.flags = (m.flags & ~(rwMATRIXINTERNALIDENTITY | rwMATRIXTYPEMASK)) | rwMATRIXTYPEORTHONORMAL;
-        }
-    }
-    obj->UpdateRwFrame();
 
-    // Look up the live slot again: neither a catalogue-time COL nor a
-    // successful Create proves both model and instance are safe for Add.
-    const auto *live = LiveModelInfo(id);
-    if (!HasMappedObjectInstance(obj) ||
-        !(params.roadSlab ? HasRoadSurface(live) : HasMappedModelResources(live))) {
+    // Last gate sits directly before Add, after any calls into RenderWare.
+    if (params.roadSlab && !HasCollisionPrimitives(LiveModelInfo(id))) {
         DeletePoolObject(obj, false);
-        return fail("model or instance resources missing; Add not called");
+        return fail("road COL lost its surface; Add not called", false);
     }
+    if (const char *error = PhysicalAddError(obj, id, ENTITY_TYPE_OBJECT, true)) {
+        DeletePoolObject(obj, false);
+        return fail(error);
+    }
+    if (params.roadSlab)
+        USA_LOG_I("Road Add begin: model=%d object=%p pos=(%.2f,%.2f,%.2f)", id, static_cast<void *>(obj),
+                  params.pos.x, params.pos.y, params.pos.z);
     CWorld::Add(obj);
+    if (params.roadSlab)
+        USA_LOG_I("Road Add returned: model=%d object=%p", id, static_cast<void *>(obj));
 
     const auto handle = reinterpret_cast<uintptr_t>(obj);
     m_owned[handle] = OwnedObject{id, params.interior, params.pos};
@@ -909,8 +1097,10 @@ void GTASAAdapter::DeletePoolObject(CObject *obj, bool inWorld) {
     if (inWorld)
         CWorld::Remove(obj);
     // A non-null but unmapped instance must not be dereferenced by the destructor.
-    if (!HasMappedObjectInstance(obj))
+    if (!HasMappedObjectInstance(obj) || !IsMappedRange(obj->m_pRwObject->parent, sizeof(RwFrame)))
         obj->m_pRwObject = nullptr;
+    if (obj->m_matrix && !IsMappedRange(obj->m_matrix, sizeof(*obj->m_matrix)))
+        obj->m_matrix = nullptr;
     obj->~CObject();
     pool->Delete(obj);
 }
@@ -922,7 +1112,7 @@ bool GTASAAdapter::IsObjectCollisionReady(ObjectHandle handle) {
     auto *obj = reinterpret_cast<CObject *>(handle.raw);
     auto *pool = CPools::ms_pObjectPool;
     return pool && pool->IsObjectValid(obj) && HasMappedObjectInstance(obj) && obj->bUsesCollision &&
-           obj->m_nModelIndex == it->second.modelId && HasRoadSurface(LiveModelInfo(it->second.modelId));
+           obj->m_nModelIndex == it->second.modelId && HasCollisionPrimitives(LiveModelInfo(it->second.modelId));
 }
 
 bool GTASAAdapter::HasRoadSupportAt(ObjectHandle handle, const Vec3f &surface) {
@@ -960,9 +1150,8 @@ void GTASAAdapter::DestroyObject(ObjectHandle handle) {
 
 bool GTASAAdapter::MoveWorldObject(CObject *obj, int modelId, const Vec3f &pos) {
     // The native Teleport path can remove and internally re-add a CObject.
-    if (!HasMappedObjectInstance(obj) || obj->m_nModelIndex != modelId ||
-        !HasMappedModelResources(LiveModelInfo(modelId))) {
-        LogUnreadyModel(modelId, "model or instance resources missing before CObject::Teleport");
+    if (const char *error = PhysicalAddError(obj, modelId, ENTITY_TYPE_OBJECT, false)) {
+        LogUnreadyModel(modelId, error);
         return false;
     }
     obj->Teleport(ToCV(pos), false);

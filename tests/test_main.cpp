@@ -19,6 +19,7 @@
 #include "core/model_catalog.hpp"
 #include "core/regions.hpp"
 #include "core/test_polygon.hpp"
+#include "core/test_car.hpp"
 #include "core/touch_gesture.hpp"
 #include "core/world_delta.hpp"
 #include "net/cloud_sync.hpp"
@@ -36,6 +37,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #ifndef USA1TO1_SOURCE_DIR
 #define USA1TO1_SOURCE_DIR "."
@@ -1210,6 +1213,7 @@ TEST(spawn_validation_requires_mapped_model_rw_collision_and_object_rw) {
     struct FakeResource { int value = 42; } rw, col;
     struct FakeModel { FakeResource *m_pRwObject; FakeResource *m_pColModel; } model{&rw, &col};
     struct FakeObject { FakeResource *m_pRwObject; } object{&rw};
+    CHECK(!HasMappedObjectInstance(static_cast<FakeObject *>(nullptr)));
     CHECK(HasMappedModelResources(&model));
     CHECK(HasMappedObjectInstance(&object));
     CHECK(!HasMappedModelResources(static_cast<FakeModel *>(nullptr)));
@@ -1224,6 +1228,62 @@ TEST(spawn_validation_requires_mapped_model_rw_collision_and_object_rw) {
     CHECK(!HasMappedObjectInstance(&object));
     object.m_pRwObject = reinterpret_cast<FakeResource *>(0x595);
     CHECK(!HasMappedObjectInstance(&object));
+}
+
+TEST(spawn_guard_checks_full_sixteen_byte_instance_rw_range) {
+    const long page = ::sysconf(_SC_PAGESIZE);
+    CHECK(page >= 16);
+    if (page < 16)
+        return;
+    auto *arena = static_cast<char *>(::mmap(nullptr, 2 * page, PROT_READ | PROT_WRITE,
+                                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    CHECK(arena != MAP_FAILED);
+    if (arena == MAP_FAILED)
+        return;
+    CHECK(::munmap(arena + page, page) == 0);
+    struct FakeObject { char *m_pRwObject; } object{arena + page - 8};
+    CHECK(IsMappedRange(object.m_pRwObject, 8));
+    CHECK(!HasMappedObjectInstance(&object));
+    object.m_pRwObject = arena + page - 16;
+    CHECK(HasMappedObjectInstance(&object));
+    CHECK(::munmap(arena, page) == 0);
+}
+
+TEST(test_car_waits_for_ground_and_loaded_model_then_spawns_once) {
+    class CarBridge : public test::MockBridge {
+      public:
+        bool ready = false;
+        bool IsModelLoaded(int id) override { return id == TestCarRequest::kModel && ready; }
+        bool RequestTestCarModel(int id) override { return RequestModel(id, false); }
+        bool SpawnTestCar(int id, const Vec3f &pos) override {
+            CHECK(ready && id == TestCarRequest::kModel);
+            CHECK(pos.x == 10.0f && pos.y == 27.0f && pos.z == 301.0f);
+            ++cars;
+            return true;
+        }
+        int cars = 0;
+    } bridge;
+    TestCarRequest car;
+    using Result = TestCarRequest::Result;
+    const Vec3f ground{10, 27, 301};
+    car.Enqueue();
+    CHECK(car.Tick(bridge, std::nullopt) == Result::Waiting);
+    CHECK(bridge.requests == 0 && bridge.cars == 0);
+    CHECK(car.Tick(bridge, ground) == Result::Requested);
+    CHECK(bridge.requests == 1 && bridge.flushes == 1 && bridge.cars == 0);
+    car.Enqueue(); // coalesced with this request
+    CHECK(car.Tick(bridge, ground) == Result::Waiting);
+    bridge.ready = true;
+    CHECK(car.Tick(bridge, std::nullopt) == Result::Waiting);
+    CHECK(car.Tick(bridge, ground) == Result::Spawned);
+    CHECK(bridge.cars == 1 && bridge.flushes == 1 && bridge.releases == 1);
+    CHECK(car.Tick(bridge, ground) == Result::Idle);
+    car.Enqueue();
+    bridge.ready = false;
+    CHECK(car.Tick(bridge, ground) == Result::Requested);
+    bridge.now += 9.0;
+    CHECK(car.Tick(bridge, ground) == Result::TimedOut);
+    CHECK(bridge.cars == 1 && bridge.flushes == 2 && bridge.releases == 2);
 }
 
 TEST(polygon_defers_unready_road_and_flushes_only_once) {
@@ -1262,6 +1322,9 @@ TEST(polygon_holds_player_when_other_tiles_exist_but_support_is_missing) {
     bridge.player = {10.0f, 20.0f, 40.0f};
     TestPolygon polygon(bridge, MakeTestCatalog());
     CHECK(polygon.Enable({1010, 2020}, {1000, 2000}));
+    CHECK(polygon.TileCount() == 0 && polygon.WaitingForSupport());
+    CHECK(!polygon.TestCarPosition({1010, 2020}, {1000, 2000}));
+    polygon.Update({1010, 2020}, {1000, 2000});
     CHECK(polygon.TileCount() > 0 && polygon.WaitingForSupport());
     CHECK(bridge.player.x == 10.0f && bridge.player.y == 20.0f && bridge.player.z == 301.5f);
     CHECK(bridge.playerVelocity.x == 0 && bridge.playerVelocity.y == 0 && bridge.playerVelocity.z == 0);
@@ -1287,10 +1350,12 @@ TEST(polygon_force_requests_each_verified_candidate_once_and_reports_why_it_fail
         std::vector<int> roadRequests;
         bool RequestRoadModel(int id) override {
             roadRequests.push_back(id);
+            reason = nullptr;
             return RequestModel(id, false);
         }
         bool IsRoadModelLoaded(int id) override { return id != 3001 && IsModelLoaded(id); }
         const char *RoadSpawnError() const override { return reason; }
+        bool RoadCandidateRejected() const override { return reason != nullptr; }
         ObjectHandle CreateObject(const SpawnParams &params) override {
             CHECK(params.roadSlab && params.collision && !params.dynamic);
             CHECK(flushes == static_cast<int>(roadRequests.size()));
@@ -1313,7 +1378,7 @@ TEST(polygon_force_requests_each_verified_candidate_once_and_reports_why_it_fail
     }
     TestPolygon polygon(bridge, catalog);
     CHECK(polygon.Enable({}, {}));
-    CHECK(polygon.StatusLine().find("model not loaded; Add not called") != std::string::npos);
+    CHECK(polygon.StatusLine().find("Loaded: no | Spawned: 0 | Err: model not loaded; Add not called") != std::string::npos);
     CHECK(polygon.WaitingForSupport() && bridge.flushes == 1);
     bridge.now = 4.1;
     polygon.Update({}, {});
@@ -1321,12 +1386,13 @@ TEST(polygon_force_requests_each_verified_candidate_once_and_reports_why_it_fail
     polygon.Update({}, {});
     CHECK(polygon.StatusLine().find("CObject::Create returned nullptr") != std::string::npos);
     CHECK(polygon.WaitingForSupport() && polygon.TileCount() == 0);
-    bridge.now = 8.2;
-    polygon.Update({}, {});
+    CHECK(polygon.RoadModel() == 18450 && bridge.created == 0); // rejected before Add, advance immediately
     polygon.Update({}, {});
     CHECK(polygon.RoadModel() == 18450 && bridge.flushes == 3 && bridge.releases == 2);
     CHECK(!polygon.WaitingForSupport() && polygon.TileCount() > 0);
-    CHECK(polygon.StatusLine().find("Err: none") != std::string::npos);
+    CHECK(polygon.StatusLine().find("Loaded: yes | Spawned: 13 | Err: none") != std::string::npos);
+    const auto carPosition = polygon.TestCarPosition({}, {});
+    CHECK(carPosition && carPosition->y == 7.0f && carPosition->z == 301.0f);
 }
 
 TEST(interior_defers_unready_props_and_flushes_only_once) {
@@ -1376,7 +1442,9 @@ TEST(polygon_sets_height_and_recovers_after_origin_shift_or_fall) {
     bridge.player = {10.0f, 20.0f, 40.0f};
     CHECK(polygon.Enable({1010.0, 2020.0}, {1000.0, 2000.0}));
     CHECK(polygon.RoadModel() == 3001);
-    CHECK(bridge.player.x == 10.0f && bridge.player.y == 20.0f && bridge.player.z == 402.0f);
+    CHECK(bridge.player.x == 10.0f && bridge.player.y == 20.0f && bridge.player.z == 401.5f);
+    CHECK(!polygon.HasVisuals());
+    polygon.Update({1010.0, 2020.0}, {1000.0, 2000.0});
     CHECK(polygon.HasVisuals());
     for (const auto &kv : bridge.objects) {
         CHECK(kv.second.collision);
@@ -1467,6 +1535,8 @@ TEST(polygon_spawns_endless_road_with_200m_markers) {
     const Vec2d start(5000.0, 0.0);
     CHECK(polygon.Enable(start, origin));
     CHECK(polygon.Active());
+    CHECK(!polygon.HasVisuals());
+    polygon.Update(start, origin);
     CHECK(polygon.HasVisuals());
     CHECK(polygon.RoadModel() == 5000); // probe wins over catalogue in the mock
     CHECK(polygon.TileCount() > 0);

@@ -86,6 +86,7 @@ class IEngineBridge {
     virtual bool RequestRoadModel(int modelId) { return RequestModel(modelId, false); }
     virtual bool IsRoadModelLoaded(int modelId) { return IsModelLoaded(modelId); }
     virtual const char *RoadSpawnError() const { return nullptr; }
+    virtual bool RoadCandidateRejected() const { return false; }
     // True when streaming and the live render/collision resources are ready for spawning.
     virtual bool IsModelLoaded(int modelId) = 0;
     virtual void ReleaseModel(int modelId) = 0;
@@ -101,6 +102,8 @@ class IEngineBridge {
     virtual void DestroyObject(ObjectHandle handle) = 0;
     virtual void MoveObject(ObjectHandle handle, const Vec3f &pos) = 0;
     virtual size_t OwnedObjectCount() const = 0;
+    virtual bool RequestTestCarModel(int) { return false; }
+    virtual bool SpawnTestCar(int, const Vec3f &) { return false; }
 
     // --- markers -------------------------------------------------------------
     // interior markers live in the z>=1000 pocket and are never shifted with the world.

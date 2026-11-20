@@ -22,6 +22,7 @@ namespace ui {
 struct OverlayActions {
     std::function<void(const core::CityAnchor &)> teleportToCity;
     std::function<void()> togglePolygon;
+    std::function<void()> spawnCar;
     std::function<void(const std::string &missionId)> startMission;
     std::function<void()> abortMission;
     std::function<void()> syncNow;

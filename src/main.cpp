@@ -18,6 +18,7 @@
 #include "core/model_catalog.hpp"
 #include "core/regions.hpp"
 #include "core/test_polygon.hpp"
+#include "core/test_car.hpp"
 #include "core/touch_gesture.hpp"
 #include "core/world_delta.hpp"
 #include "net/android_http.hpp"
@@ -65,6 +66,7 @@ class ModApp {
     void AutosaveDelta(bool force);
     void TeleportToCity(const CityAnchor &city);
     void TogglePolygon();
+    void TickTestCar(const Vec3f &local);
     void StartMission(const std::string &id);
     void ApplyInitialSpawn();
     void SaveDelta();
@@ -75,6 +77,8 @@ class ModApp {
     ui::ImGuiOverlay m_overlay;
     RawMenuGesture m_menuGesture;
     std::atomic<bool> m_menuTogglePending{false};
+    std::atomic<bool> m_carButtonPressed{false};
+    TestCarRequest m_testCar;
 
     ModelCatalog m_catalog;
     StatusFeed m_roadStatus;
@@ -277,6 +281,7 @@ void ModApp::OnUnload() {
     if (!m_ready)
         return;
     SaveDelta();
+    m_testCar.Cancel(m_adapter);
     if (m_polygon)
         m_polygon->Disable();
     if (m_streamer)
@@ -327,6 +332,7 @@ void ModApp::WireOverlayActions() {
     ui::OverlayActions actions;
     actions.teleportToCity = [this](const CityAnchor &city) { TeleportToCity(city); };
     actions.togglePolygon = [this]() { TogglePolygon(); };
+    actions.spawnCar = [this]() { m_carButtonPressed.store(true); };
     actions.startMission = [this](const std::string &id) { StartMission(id); };
     actions.abortMission = [this]() {
         if (m_runner.IsActive()) {
@@ -396,10 +402,13 @@ void ModApp::OnTick(double dt) {
     }
     if (!m_adapter.IsGameReady())
         return;
+    bool polygonStarted = false;
     if (!m_initialSpawnDone) {
         ApplyInitialSpawn();
-        if (m_initialSpawnDone && m_config.autoStartPolygon)
+        if (m_initialSpawnDone && m_config.autoStartPolygon) {
             TogglePolygon();
+            polygonStarted = true;
+        }
     }
 
     Vec3f local;
@@ -408,6 +417,10 @@ void ModApp::OnTick(double dt) {
 
     // --- interior pocket: main world logic is suspended while inside --------
     if (m_interiors->IsInside()) {
+        if (m_carButtonPressed.exchange(false) || m_testCar.Pending()) {
+            m_testCar.Cancel(m_adapter);
+            m_adapter.ShowToast("Spawn Car: go outside first");
+        }
         const auto ev = m_interiors->Update(local, m_delta);
         if (ev == InteriorManager::Event::Robbed) {
             const int64_t reward = m_interiors->TakeRobberyReward();
@@ -459,8 +472,11 @@ void ModApp::OnTick(double dt) {
     }
 
     // --- test polygon -------------------------------------------------------
-    if (m_polygon->Active())
+    if (m_polygon->Active() && !polygonStarted)
         m_polygon->Update(global, m_origin.Offset());
+    // A hold or origin shift can change the player's position this tick.
+    if ((m_carButtonPressed.load() || m_testCar.Pending()) && m_adapter.GetPlayerPosition(local))
+        TickTestCar(local);
 
     // --- missions -----------------------------------------------------------
     if (m_runner.IsActive()) {
@@ -489,6 +505,26 @@ void ModApp::OnTick(double dt) {
 
     AutosaveDelta(false);
     UpdateTelemetry();
+}
+
+void ModApp::TickTestCar(const Vec3f &local) {
+    if (m_carButtonPressed.exchange(false) && !m_testCar.Pending()) {
+        if (m_interiors->IsInside()) {
+            m_adapter.ShowToast("Spawn Car: go outside first");
+            return;
+        }
+        m_testCar.Enqueue();
+        m_adapter.ShowToast("Spawn Car: waiting for nearby solid ground and Sultan model");
+    }
+    if (!m_testCar.Pending())
+        return;
+    std::optional<Vec3f> position;
+    if (m_polygon->Active())
+        position = m_polygon->TestCarPosition(m_origin.ToGlobal(local), m_origin.Offset());
+    else if (Vec3f ground; m_adapter.FindTestCarGround(local, ground))
+        position = ground;
+    if (m_testCar.Tick(m_adapter, position) == TestCarRequest::Result::TimedOut)
+        m_adapter.ShowToast(position ? "Spawn Car: Sultan streaming timed out" : "Spawn Car: no solid ground nearby");
 }
 
 bool ModApp::OnTouch(int action, int track, int x, int y) {

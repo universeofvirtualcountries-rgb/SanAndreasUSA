@@ -14,7 +14,7 @@ template <class ModelInfo> bool HasMappedModelResources(const ModelInfo *model) 
 
 template <class Object> bool HasMappedObjectInstance(const Object *object) {
     return IsMappedRange(object, sizeof(*object)) &&
-           IsMappedRange(object->m_pRwObject, sizeof(*object->m_pRwObject));
+           IsMappedRange(object->m_pRwObject, std::max<size_t>(16, sizeof(*object->m_pRwObject)));
 }
 
 } // namespace usa1to1::core

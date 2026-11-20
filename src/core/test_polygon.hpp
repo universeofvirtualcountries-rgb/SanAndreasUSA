@@ -54,9 +54,11 @@ class TestPolygon {
     bool HasVisuals() const { return !m_tiles.empty(); }
     int RoadModel() const { return m_roadModel; }
     std::string StatusLine() const;
+    std::optional<Vec3f> TestCarPosition(const Vec2d &playerGlobal, const Vec2d &origin);
     int64_t TileIndexAt(double globalY) const;
 
   private:
+    void UpdateTiles(const Vec2d &playerGlobal, const Vec2d &origin, bool allowSpawn);
     void Clear();
     void ClearRoad();
     void SelectRoad(const Vec2d &anchor);
@@ -73,6 +75,8 @@ class TestPolygon {
     double m_fallbackAt = 0.0;
     std::string m_roadError;
     bool m_requested = false;
+    bool m_modelLoaded = false;
+    bool m_rejected = false;
     float m_tileHeading = 0.0f;
     double m_tileLength = 20.0;
     float m_tileHalfWidth = 0.0f;

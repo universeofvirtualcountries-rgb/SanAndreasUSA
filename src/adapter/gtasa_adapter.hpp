@@ -26,6 +26,9 @@ struct CVector;
 struct CColPoint;
 struct CStoredCollPoly;
 struct ColDef;
+struct CPhysical;
+struct CColModel;
+struct CAutomobile;
 
 namespace usa1to1 {
 namespace adapter {
@@ -58,6 +61,9 @@ class GTASAAdapter final : public core::IEngineBridge {
     // larger with Fastman92). Everything above it is never scanned.
     void SetModelIdLimit(int limit);
     int ModelScanLimit() const;
+    bool RequestTestCarModel(int id) override;
+    bool SpawnTestCar(int id, const core::Vec3f &pos) override;
+    bool FindTestCarGround(const core::Vec3f &player, core::Vec3f &position);
     const std::string &LastError() const { return m_lastError; }
     // Status messages for the overlay. Never routed through aml->ShowToast():
     // that is a JNI facade and calling it from the game thread aborts on ART.
@@ -97,6 +103,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     bool RequestRoadModel(int modelId) override;
     bool IsRoadModelLoaded(int modelId) override;
     const char *RoadSpawnError() const override { return m_roadSpawnError; }
+    bool RoadCandidateRejected() const override { return m_roadCandidateRejected; }
     bool IsModelLoaded(int modelId) override;
     void ReleaseModel(int modelId) override;
     void ReleaseRoadModel(int modelId) override;
@@ -168,6 +175,9 @@ class GTASAAdapter final : public core::IEngineBridge {
     int MovePoolEntities(bool peds, bool vehicles, const core::Vec3f &delta, bool includeInterior);
     CBaseModelInfo **LiveModelTable() const;
     const CBaseModelInfo *LiveModelInfo(int modelId) const;
+    const char *PhysicalAddError(CPhysical *entity, int id, unsigned type, bool fresh);
+    const char *SyncPhysicalTransform(CPhysical *entity, const core::Vec3f &pos, float heading);
+    bool IsTestCarModel(int id) const;
     bool MoveWorldObject(CObject *obj, int modelId, const core::Vec3f &pos);
     void LogUnreadyModel(int modelId, const char *reason);
     void DeletePoolObject(CObject *obj, bool inWorld);
@@ -191,6 +201,12 @@ class GTASAAdapter final : public core::IEngineBridge {
     CObject *(*m_createObject)(int, bool) = nullptr;
     void (*m_createRwObject)(CEntity *) = nullptr;
     void (*m_updateRwMatrix)(CEntity *) = nullptr;
+    CColModel *(*m_getEntityCollision)(CEntity *) = nullptr;
+    void *(*m_vehicleAlloc)(size_t) = nullptr;
+    void (*m_vehicleFree)(void *) = nullptr;
+    void (*m_automobileCtor)(CAutomobile *, int, uint8_t, uint8_t) = nullptr;
+    void (*m_automobileDtor)(CAutomobile *) = nullptr;
+    const void *m_vehicleModelVtable = nullptr;
     void (*m_addColRef)(int) = nullptr;
     void (*m_removeColRef)(int) = nullptr;
     int m_requiredRoadModel = -1;
@@ -198,6 +214,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     const ColDef *m_roadColDef = nullptr;
     bool (*m_processVerticalLine)(const CVector &, float, CColPoint &, CEntity *&,
                                   bool, bool, bool, bool, bool, bool, CStoredCollPoly *) = nullptr;
+    CEntity *(*m_testWorldSphere)(CVector, float, CEntity *, bool, bool, bool, bool, bool, bool) = nullptr;
     void *m_modelByName = nullptr;
     CBaseModelInfo **m_exportedModelTable = nullptr;
     std::unordered_map<int, double> m_nextUnreadyLog;
@@ -206,6 +223,7 @@ class GTASAAdapter final : public core::IEngineBridge {
     uint64_t m_nextMarkerEngineId = 0x55000000ULL;
 
     core::StatusFeed m_status;
+    bool m_roadCandidateRejected = false;
     const char *m_roadSpawnError = nullptr; // game/render lane, static messages
     std::unordered_map<uintptr_t, OwnedObject> m_owned;
     std::unordered_map<uint64_t, MarkerInfo> m_markers;

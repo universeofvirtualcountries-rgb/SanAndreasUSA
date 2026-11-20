@@ -243,6 +243,8 @@ void ImGuiOverlay::Draw() {
 
         if (ImGui::BeginTabItem("Teleports")) {
             m_selectedTab = 1;
+            if (ImGui::Button("Spawn Car") && m_actions.spawnCar)
+                m_actions.spawnCar();
             ImGui::TextWrapped("1:1 plane teleport keeps the floating origin intact: the world shifts "
                                "under the player, physics keeps its velocities.");
             for (const auto &city : core::GetCityAnchors()) {
@@ -258,6 +260,8 @@ void ImGuiOverlay::Draw() {
 
         if (ImGui::BeginTabItem("Polygon")) {
             m_selectedTab = 2;
+            if (ImGui::Button("Spawn Car") && m_actions.spawnCar)
+                m_actions.spawnCar();
             ImGui::TextWrapped("Infinite straight road with a marker every 200 m in global space. "
                                "Drive it and watch the shift counter - that is the 1:1 stress test.");
             if (ImGui::Button(m_model.polygonActive ? "Stop polygon" : "Start polygon")) {
